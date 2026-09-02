@@ -307,6 +307,7 @@ start_webcam_capture() {
       2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
         "$(overlay_vf "$(cfg .webcamShape frame)" "${size#*x}")" --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
         --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
+    echo $! >"$CAM_PID_FILE" # before the watchdog below, whose pid must never replace ffmpeg's
     ( # put the self-view in the chosen corner once its window exists; say so if it never does
       local n placed=false
       for n in $(seq 60); do
@@ -318,17 +319,19 @@ start_webcam_capture() {
       done
       if [[ $placed == true ]]; then
         log "webcam self-view shown ($(hyprctl -j clients | jq -c 'first(.[] | select(.title == "WebcamOverlay")) | {at, size, ws: .workspace.id}' 2>/dev/null))"
-      else
+      elif webcam_capture_alive; then
         log "webcam self-view window did not appear within 6 s (mpv output above)"
         notify -u normal -t 6000 "Omareel: camera self-view did not appear" "The camera is still being recorded and will be in the video. See $LOG_FILE"
+      else
+        log "webcam self-view: camera capture already exited (reported separately)"
       fi
     ) &
     disown
   else
     ffmpeg -y -v error -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
       -use_wallclock_as_timestamps 1 -i "$device" "${encode[@]}" -f mp4 "$out" >>"$LOG_FILE" 2>&1 &
+    echo $! >"$CAM_PID_FILE"
   fi
-  echo $! >"$CAM_PID_FILE"
 }
 
 # Camera warm-up is ~1 s; wait (bounded) until frames are flowing so the
@@ -413,6 +416,9 @@ cleanup_webcam() {
   # Anchored to mpv's own command line: a bare -f "WebcamOverlay" also kills
   # any shell or editor whose arguments merely mention the word.
   pkill -f -- '^mpv .*--title=WebcamOverlay' 2>/dev/null
+  # A camera capture whose pid file was lost (crash, old version) would hold
+  # the camera for every later take; only Omareel writes *.cam.mp4 with tee.
+  pkill -INT -f -- '^ffmpeg .*\.cam\.mp4' 2>/dev/null
   rm -f "$WEBCAM_REGION_FILE"
 }
 
@@ -653,7 +659,8 @@ cmd_start() {
       date +%s.%N >"${raw%.raw.mp4}.cam.start"
     else
       webcam_failed "${cam_device:-camera}" "capture exited before the recording started"
-      rm -f "$CAM_PID_FILE" "${raw%.raw.mp4}.cam.mp4"
+      stop_webcam_capture
+      rm -f "${raw%.raw.mp4}.cam.mp4"
     fi
   fi
 
