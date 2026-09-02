@@ -32,11 +32,10 @@ upload it, or copy its link or path:
   focused monitor. GPU encoding through `gpu-screen-recorder`.
 - **Camera frame** in any corner of the recording: a rounded 16:9 frame
   (the Loom look), a circle, or a portrait card, in four sizes, any camera.
-  In Area and Screen recordings it is a transparent window placed in the
-  chosen corner *of the recorded region* so the capture picks it up. In
-  Window recordings the camera is recorded to its own file and composited
-  into that corner after Stop; the same frame floats on screen meanwhile so
-  you can see yourself (it is not part of the window capture).
+  It works the same way in every mode, like a screen studio: the camera is
+  recorded to its own file and a self-view floats in the corner where the
+  frame will be. Area and Screen captures include that self-view as-is;
+  a Window capture cannot see it, so the frame is drawn in after Stop.
 - **Pick your microphone** and your system-audio source from dropdowns.
 - **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
   track after the recording, blended so the voice keeps its body, tone
@@ -225,7 +224,6 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "webcamSize": "medium",     // small | medium | large | xlarge (16/22/30/40 % of the recording height)
   "webcamShape": "frame",     // frame (16:9, rounded) | circle | portrait (8:9 card)
   "webcamCorner": "bottom-right", // bottom-left | top-right | top-left
-  "webcamMode": "auto",       // auto: on-screen frame for Area/Screen, composited for Window | composite: always composited
   "denoise": true,
   "denoiseEngine": "auto",    // auto | ladspa | arnndn | afftdn | off
   "denoiseModel": "bd",       // arnndn model: bd (general) | sh (speech)
@@ -249,13 +247,13 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
 launcher / keybind / menu
         │
         ▼
-bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv camera frame (transparent, masked)
-                             (Window mode: ffmpeg records the camera to <id>.cam.mp4)
+bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC); ffmpeg records the camera to
+                             <id>.cam.mp4 and tees it to an mpv self-view (masked, hidden from window capture)
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
         ├─ ffmpeg: trim pop → highpass → denoise (blend + shelf) → 2-pass loudnorm → +faststart
-        │          + camera frame overlay (shape/corner/size) when a camera take exists
+        │          + camera frame overlay (shape/corner/size) for Window recordings
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
