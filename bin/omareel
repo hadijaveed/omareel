@@ -283,19 +283,32 @@ webcam_failed() {
   fi
 }
 
-# start_webcam_capture <device> <out.cam.mp4>
+# One ffmpeg encodes the camera once and tees it to the file and, when
+# <preview> is "preview", to an mpv window in the corner of the screen so you
+# can see yourself while recording (a Window capture never includes it). The
+# preview slave is onfail=ignore: closing or killing the preview window cannot
+# take the camera recording down.
+# start_webcam_capture <device> <out.cam.mp4> [size] [preview]
 start_webcam_capture() {
-  local device="$1" out="$2" formats size="640x360" input=()
+  local device="$1" out="$2" bubble_size="${3:-medium}" preview="${4:-}" formats size="640x360" input=()
   cleanup_webcam # an orphaned capture from a crashed run would hold the camera
   formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
   if grep -q MJPG <<<"$formats"; then
     input=(-input_format mjpeg)
     grep -q 1280x720 <<<"$formats" && size="1280x720"
   fi
-  ffmpeg -y -v error -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
-    -use_wallclock_as_timestamps 1 -i "$device" \
-    -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -g 30 \
-    -copyts -f mp4 "$out" >>"$LOG_FILE" 2>&1 &
+  local encode=(-map 0:v -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts)
+  if [[ $preview == preview ]]; then
+    ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
+      -use_wallclock_as_timestamps 1 -i "$device" "${encode[@]}" \
+      -f tee "[f=mp4:onfail=ignore]$out|[f=nut:onfail=ignore]pipe:1" \
+      2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut \
+        '--vf=lavfi=[crop=ih*8/9:ih]' --title="WebcamOverlay" --wayland-app-id="WebcamOverlay-$bubble_size" \
+        --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
+  else
+    ffmpeg -y -v error -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
+      -use_wallclock_as_timestamps 1 -i "$device" "${encode[@]}" -f mp4 "$out" >>"$LOG_FILE" 2>&1 &
+  fi
   echo $! >"$CAM_PID_FILE"
 }
 
@@ -373,7 +386,7 @@ cleanup_webcam() {
   kill_tracked "$OVERLAY_PID_FILE" mpv
   # Anchored to mpv's own command line: a bare -f "WebcamOverlay" also kills
   # any shell or editor whose arguments merely mention the word.
-  pkill -f -- '^mpv av://v4l2:.*--title=WebcamOverlay' 2>/dev/null
+  pkill -f -- '^mpv .*--title=WebcamOverlay' 2>/dev/null
   rm -f "$WEBCAM_REGION_FILE"
 }
 
@@ -559,7 +572,11 @@ cmd_start() {
   if [[ $webcam == true ]]; then
     if [[ $target == portal || $(cfg .webcamMode auto) == composite ]]; then
       if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
-        start_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4"
+        # Window mode gets a live self-view (never part of a window capture);
+        # composite mode on an area/screen must not, or the bubble appears twice.
+        local preview=""
+        [[ $target == portal ]] && preview=preview
+        start_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4" "$(cfg .webcamSize medium)" "$preview"
         [[ $target == portal ]] || wait_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4" || true
       else
         notify -u critical -t 3000 "Omareel: no webcam found"

@@ -31,9 +31,11 @@ upload it, or copy its link or path:
   (via the portal picker, so it stays captured even when covered), or the
   focused monitor. GPU encoding through `gpu-screen-recorder`.
 - **Webcam bubble** in the corner of the recording, any camera, three sizes.
-  In Area and Screen recordings it is a small window on the screen; in
-  Window recordings the camera is recorded separately and composited in as a
-  round bubble afterwards, so it works in every mode.
+  In Area and Screen recordings it is a small window on the screen that the
+  capture picks up. In Window recordings the camera is recorded to its own
+  file and composited in as a round bubble after Stop; a live self-view
+  floats in the corner meanwhile so you can see yourself (it is not part of
+  the window capture).
 - **Pick your microphone** and your system-audio source from dropdowns.
 - **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
   track after the recording, blended so the voice keeps its body, tone
