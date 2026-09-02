@@ -623,7 +623,7 @@ Panel {
               label: "Camera bubble"
               description: root.webcamOn
                 ? Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium")
-                : "Off — Area and Screen recordings only"
+                : "Off — puts you in the corner of the video"
               checked: root.webcamOn
               onClicked: root.setConfig("webcam", !root.webcamOn)
             }
@@ -944,6 +944,17 @@ Panel {
             ]
             value: String(Omareel.get(root.config, "denoiseEngine", "auto"))
             onChanged: function(v) { root.setConfig("denoiseEngine", v) }
+          }
+          Dropdown {
+            width: parent.width
+            label: "Strength"
+            options: [
+              { value: "light", label: "Light — most natural voice" },
+              { value: "normal", label: "Normal — voice first, noise mostly gone" },
+              { value: "strong", label: "Strong — noisy rooms; can sound thin" }
+            ]
+            value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
+            onChanged: function(v) { root.setConfig("denoiseStrength", v) }
           }
           Hint {
             text: "Active: " + String(root.doctor.engine || "…")

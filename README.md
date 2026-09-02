@@ -31,9 +31,13 @@ upload it, or copy its link or path:
   (via the portal picker, so it stays captured even when covered), or the
   focused monitor. GPU encoding through `gpu-screen-recorder`.
 - **Webcam bubble** in the corner of the recording, any camera, three sizes.
+  In Area and Screen recordings it is a small window on the screen; in
+  Window recordings the camera is recorded separately and composited in as a
+  round bubble afterwards, so it works in every mode.
 - **Pick your microphone** and your system-audio source from dropdowns.
-- **Noise removal.** RNNoise clean-up of the microphone track after the
-  recording, then loudness normalisation to speech level.
+- **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
+  track after the recording, blended so the voice keeps its body, tone
+  corrected, then two-pass loudness normalisation to speech level.
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.
 - **Share only what you choose.** After Stop the banner offers **Upload**;
@@ -141,6 +145,9 @@ back through the public URL, and deletes it.
 
 The bucket must allow public reads of the uploaded objects. Objects are named
 by the recording's UUID, so links are not guessable and survive local renames.
+Uploads set explicit `Content-Type` and `Content-Disposition: inline` headers
+and the player page carries Open Graph video tags, so Slack, Teams and
+friends unfurl the link as a page with a poster and a click opens the player.
 
 Credentials are stored by `omareel remote save` in
 `~/.config/rclone/rclone.conf` (mode 600) under the `[omareel]` remote.
@@ -148,6 +155,16 @@ Credentials are stored by `omareel remote save` in
 makes it safe to keep in a dotfiles repo.
 
 ## Noise removal
+
+The chain is: cut rumble below 80 Hz → denoise → high shelf (−2.5 dB above
+4 kHz) → two-pass `loudnorm` to −16 LUFS. RNNoise at full strength thins a
+voice out and makes it sound shrill (measured on a real take: spectral
+centroid 2.7 → 3.4 kHz, +2 dB above 3 kHz), so by default only 70 % of the
+denoised signal is used and the shelf pulls the top back to where the raw
+take was, within half a decibel across the bands. **Strength** in settings
+moves this: *Light* (50 %) for the most natural voice, *Strong* (100 %) for
+noisy rooms. Two-pass loudness normalisation applies one linear gain instead
+of the single-pass dynamic mode, which pumps and exaggerates sibilance.
 
 The engine setting `auto` picks, in order:
 
@@ -198,9 +215,11 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "mic": true,          "micDevice": "default",
   "desktopAudio": false, "desktopDevice": "default",
   "webcam": false,       "webcamDevice": "auto", "webcamSize": "medium",
+  "webcamMode": "auto",       // auto: on-screen bubble for Area/Screen, composited for Window | composite: always composited
   "denoise": true,
   "denoiseEngine": "auto",    // auto | ladspa | arnndn | afftdn | off
   "denoiseModel": "bd",       // arnndn model: bd (general) | sh (speech)
+  "denoiseStrength": "normal", // light | normal | strong (how much of the denoised signal is used)
   "vadThreshold": 50,         // LADSPA gate, %; lower if word starts get clipped
   "keepRaw": true,
   "upload": {
@@ -221,10 +240,12 @@ launcher / keybind / menu
         │
         ▼
 bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv webcam bubble
+                             (Window mode: ffmpeg records the camera to <id>.cam.mp4)
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
-        ├─ ffmpeg: trim pop → denoise → loudnorm → +faststart
+        ├─ ffmpeg: trim pop → highpass → denoise (blend + shelf) → 2-pass loudnorm → +faststart
+        │          + round camera bubble overlay when a camera take exists
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
@@ -245,8 +266,9 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
   hide them (the bar button timer and the keybinding still stop the
   recording). Area recordings move them to the bottom edge when the region
   covers the top-centre spot.
-- The webcam bubble is a window on the screen, so it appears in Area and
-  Screen recordings but not in Window recordings.
+- Window recordings with the camera on are re-encoded once to composite the
+  bubble, so they take a few extra seconds to finish. The camera take is kept
+  as `<id>.cam.mp4` next to the raw file while *Keep raw* is on.
 - Window mode uses the xdg-desktop-portal picker. If it fails on your GPU,
   use Area and click the window: the picker snaps to it.
 - No pause/resume yet.

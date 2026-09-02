@@ -34,6 +34,7 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omareel"
 STATE_FILE="$RUNTIME_DIR/state.json"
 LOG_FILE="$RUNTIME_DIR/omareel.log"
 PID_FILE="$RUNTIME_DIR/gsr.pid"
+CAM_PID_FILE="$RUNTIME_DIR/cam.pid"
 MODEL_DIR="$HOME/.local/share/omareel/models"
 RCLONE_CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
 RCLONE_REMOTE="omareel"
@@ -61,9 +62,11 @@ default_config() {
   "webcam": false,
   "webcamDevice": "auto",
   "webcamSize": "medium",
+  "webcamMode": "auto",
   "denoise": true,
   "denoiseEngine": "auto",
   "denoiseModel": "bd",
+  "denoiseStrength": "normal",
   "vadThreshold": 50,
   "keepRaw": true,
   "upload": {
@@ -199,14 +202,65 @@ audio_arg() {
 # start_webcam_overlay <device|auto> <size> <region-or-empty>
 # Same mpv overlay Omarchy's recorder uses, so the WebcamOverlay window rules
 # and omarchy-capture-webcam-resize apply unchanged.
+# webcam_device [configured] -> /dev/videoN. "auto" skips v4l2loopback devices,
+# which list first but only carry frames while something feeds them.
+webcam_device() {
+  local device="${1:-auto}"
+  if [[ $device == auto || -z $device ]]; then
+    device=$(omarchy-capture-webcam-list 2>/dev/null | grep -vi loopback | sed -n '1s/[[:space:]].*//p')
+    [[ -n $device ]] || device=$(omarchy-capture-webcam-list 2>/dev/null | sed -n '1s/[[:space:]].*//p')
+  fi
+  [[ -n $device && -e $device ]] || return 1
+  echo "$device"
+}
+
+# Record the camera to its own file so it can be composited into the video
+# afterwards. Used for Window recordings, where the on-screen bubble cannot
+# be captured, and for webcamMode=composite. Timestamps are wall-clock and
+# kept (-copyts), so finalize can line the two streams up exactly.
+# start_webcam_capture <device> <out.cam.mp4>
+start_webcam_capture() {
+  local device="$1" out="$2" formats size="640x360" input=()
+  formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
+  if grep -q MJPG <<<"$formats"; then
+    input=(-input_format mjpeg)
+    grep -q 1280x720 <<<"$formats" && size="1280x720"
+  fi
+  ffmpeg -y -v error -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
+    -use_wallclock_as_timestamps 1 -i "$device" \
+    -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -g 30 \
+    -copyts -f mp4 "$out" >>"$LOG_FILE" 2>&1 &
+  echo $! >"$CAM_PID_FILE"
+}
+
+# Camera warm-up is ~1 s; wait (bounded) until frames are flowing so the
+# bubble is there from the first frame of the recording.
+wait_webcam_capture() {
+  local out="$1" waited=0
+  while ((waited < 25)) && [[ $(stat -c %s "$out" 2>/dev/null || echo 0) -lt 4096 ]]; do
+    sleep 0.1
+    ((waited++))
+  done
+}
+
+stop_webcam_capture() {
+  [[ -f $CAM_PID_FILE ]] || return 0
+  local pid count=0
+  pid=$(cat "$CAM_PID_FILE")
+  kill -INT "$pid" 2>/dev/null
+  while kill -0 "$pid" 2>/dev/null && ((count < 50)); do
+    sleep 0.1
+    ((count++))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$CAM_PID_FILE"
+}
+
 start_webcam_overlay() {
   local device="$1" size="$2" region="$3"
   cleanup_webcam
 
-  if [[ $device == auto || -z $device ]]; then
-    device=$(omarchy-capture-webcam-list | sed -n '1s/[[:space:]].*//p')
-  fi
-  if [[ -z $device || ! -e $device ]]; then
+  if ! device=$(webcam_device "$device"); then
     notify -u critical -t 3000 "Omareel: no webcam found"
     return 1
   fi
@@ -229,7 +283,7 @@ start_webcam_overlay() {
     --really-quiet &>/dev/null &
 
   local waited=0
-  while ((waited < 40)) && ! hyprctl clients -j | jq -e 'any(.[]; .title == "WebcamOverlay")' >/dev/null 2>&1; do
+  while ((waited < 80)) && ! hyprctl clients -j | jq -e 'any(.[]; .title == "WebcamOverlay")' >/dev/null 2>&1; do
     sleep 0.05
     ((waited++))
   done
@@ -240,6 +294,7 @@ start_webcam_overlay() {
 }
 
 cleanup_webcam() {
+  stop_webcam_capture
   pkill -f "WebcamOverlay" 2>/dev/null
   rm -f "$WEBCAM_REGION_FILE"
 }
@@ -416,13 +471,25 @@ cmd_start() {
   esac
 
   # The bubble is a normal window, so it only lands in area/screen captures.
-  if [[ $webcam == true && $target != portal ]]; then
-    start_webcam_overlay "$(cfg .webcamDevice auto)" "$(cfg .webcamSize medium)" "$region" || true
-  fi
-
-  local id raw
+  # On-screen bubble ends up in Area/Screen captures. A Window capture only
+  # sees that window, so the camera is recorded separately and composited in.
+  # The camera starts first: it needs ~1 s to warm up, and the extra footage
+  # before the recording starts is trimmed by finalize.
+  local id raw cam_device
   id=$(new_id)
   raw="$output_dir/$id.raw.mp4"
+  if [[ $webcam == true ]]; then
+    if [[ $target == portal || $(cfg .webcamMode auto) == composite ]]; then
+      if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
+        start_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4"
+        [[ $target == portal ]] || wait_webcam_capture "${raw%.raw.mp4}.cam.mp4"
+      else
+        notify -u critical -t 3000 "Omareel: no webcam found"
+      fi
+    else
+      start_webcam_overlay "$(cfg .webcamDevice auto)" "$(cfg .webcamSize medium)" "$region" || true
+    fi
+  fi
 
   local devices audio_args=()
   devices=$(audio_arg "$mic" "$(cfg .micDevice default)" "$desktop" "$(cfg .desktopDevice default)")
@@ -448,8 +515,8 @@ cmd_start() {
   done
 
   if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$raw"
     cleanup_webcam
+    rm -f "$raw" "${raw%.raw.mp4}.cam.mp4" "${raw%.raw.mp4}.cam.start"
     reset_state
     if [[ $target == portal ]] && tail -20 "$LOG_FILE" | grep -qi -E 'cancel|denied'; then
       return 1 # picker cancelled
@@ -457,6 +524,10 @@ cmd_start() {
     notify -u critical -t 5000 "Omareel could not start recording" "See $LOG_FILE"
     return 1
   fi
+
+  # Wall-clock moment the recorder started writing: finalize lines the camera
+  # take up against it.
+  [[ -f $CAM_PID_FILE ]] && date +%s.%N >"${raw%.raw.mp4}.cam.start"
 
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload"
@@ -502,8 +573,9 @@ cmd_stop() {
   if ! finalize_video "$raw" "$final" "$denoise"; then
     mv "$raw" "$final" # never lose the take
   elif [[ $(cfg .keepRaw true) != true ]]; then
-    rm -f "$raw"
+    rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
   fi
+  rm -f "${raw%.raw.mp4}.cam.start"
 
   local thumb="${final%.mp4}.jpg"
   make_thumbnail "$final" "$thumb"
@@ -556,7 +628,8 @@ cmd_cancel() {
     kill -INT "$pid" 2>/dev/null
     sleep 0.5
     kill -9 "$pid" 2>/dev/null
-    [[ -n $raw ]] && rm -f "$raw"
+    stop_webcam_capture
+    [[ -n $raw ]] && rm -f "$raw" "${raw%.raw.mp4}.cam.mp4" "${raw%.raw.mp4}.cam.start"
     notify -t 3000 "Omareel recording discarded"
   fi
   cleanup_webcam
@@ -608,19 +681,62 @@ denoise_engine() {
   fi
 }
 
+# How much of the denoised signal to use. RNNoise at full strength thins the
+# voice out (measured: spectral centroid 2.7 → 3.4 kHz, +2 dB above 3 kHz),
+# which is what "shrill" sounds like; 70 % keeps the body of the voice.
+denoise_mix() {
+  case "$(cfg .denoiseStrength normal)" in
+  light) echo 0.5 ;;
+  strong) echo 1.0 ;;
+  *) echo 0.7 ;;
+  esac
+}
+
+# Applied after every denoiser: pull the top back to where the raw take was.
+DENOISE_TONE="highshelf=f=4000:g=-2.5"
+
 denoise_filter() {
   case "$1" in
   ladspa)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0"
+    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0,$DENOISE_TONE"
     ;;
   arnndn)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)")"
+    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)"):mix=$(denoise_mix),$DENOISE_TONE"
     ;;
   afftdn)
-    echo "afftdn=nf=-25:tn=1"
+    echo "afftdn=nr=10:nf=-30:tn=1"
     ;;
   *) echo "" ;;
   esac
+}
+
+# loudnorm_args <input> <chain> -> the two-pass (linear) loudnorm filter, or
+# fails when the measurement pass hit the arnndn NaN bug.
+loudnorm_measure() {
+  local raw="$1" chain="$2" j
+  j=$(ffmpeg -hide_banner -nostdin -vn -i "$raw" -af "$chain,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json" -f null - 2>&1 | sed -n '/^{/,/^}/p')
+  local mi mt ml mth off
+  mi=$(jq -r '.input_i // empty' <<<"$j" 2>/dev/null)
+  [[ $mi == -* ]] || return 1
+  mt=$(jq -r .input_tp <<<"$j"); ml=$(jq -r .input_lra <<<"$j"); mth=$(jq -r .input_thresh <<<"$j"); off=$(jq -r .target_offset <<<"$j")
+  echo "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=$mi:measured_TP=$mt:measured_LRA=$ml:measured_thresh=$mth:offset=$off:linear=true"
+}
+
+# Round camera bubble for the composite path. bubble_filter <video-h> <size> <delta-s>
+# Output pad [cam]: RGBA, transparent until the camera's first frame.
+bubble_filter() {
+  local h="$1" size="$2" delta="$3" d m
+  case "$size" in small) d=$((h * 16 / 100)) ;; large) d=$((h * 30 / 100)) ;; *) d=$((h * 22 / 100)) ;; esac
+  d=$((d / 2 * 2))
+  m=$((h * 3 / 100))
+  local timing
+  if awk -v d="$delta" 'BEGIN{exit !(d >= 0)}'; then
+    timing="setpts=PTS-STARTPTS,tpad=start_duration=$delta:color=0x00000000"
+  else
+    timing="trim=start=$(awk -v d="$delta" 'BEGIN{printf "%.3f", -d}'),setpts=PTS-STARTPTS"
+  fi
+  printf '[1:v]crop=min(iw\,ih):min(iw\,ih),scale=%d:%d,format=rgba,geq=r=%s:g=%s:b=%s:a=%s,%s[cam];[0:v][cam]overlay=W-w-%d:H-h-%d:eof_action=pass:format=auto[v]' \
+    "$d" "$d" "'r(X,Y)'" "'g(X,Y)'" "'b(X,Y)'" "'255*clip(W/2-sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))+0.5,0,1)'" "$timing" "$m" "$m"
 }
 
 # finalize_video raw out denoise(true|false)
@@ -649,17 +765,43 @@ finalize_video() {
     engines=(none)
   fi
 
+  # Camera recorded alongside (Window mode / webcamMode=composite): overlay it
+  # as a round bubble, aligned by wall-clock: delta = camera start − recording
+  # start − the 0.1 s trimmed off the front.
+  local cam="${raw%.raw.mp4}.cam.mp4" cam_args=() cam_filter=""
+  if [[ -f $cam ]] && ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$cam" 2>/dev/null | grep -q video; then
+    local cam_start raw_start height delta
+    cam_start=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 "$cam")
+    raw_start=$(cat "${cam%.mp4}.start" 2>/dev/null || true)
+    height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$raw")
+    if [[ -n $cam_start && -n $raw_start && -n $height ]]; then
+      delta=$(awk -v c="$cam_start" -v r="$raw_start" 'BEGIN{printf "%.3f", c - r - 0.1}')
+      cam_filter=$(bubble_filter "$height" "$(cfg .webcamSize medium)" "$delta")
+      cam_args=(-i "$cam")
+      video_codec=(-filter_complex "$cam_filter" -map "[v]" -map "0:a?" -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
+      log "finalize: compositing camera bubble (delta ${delta}s)"
+    else
+      log "finalize: camera file present but unreadable; skipping bubble"
+    fi
+  fi
+
   local tmp="${out%.mp4}.processing.mp4" engine
   for engine in "${engines[@]}"; do
-    local args=(-y -ss 0.1 -i "$raw" "${video_codec[@]}")
+    local args=(-y -ss 0.1 -i "$raw" "${cam_args[@]}" "${video_codec[@]}")
     if [[ $has_audio == true ]]; then
-      # 1. mute the PipeWire capture-open pop, 2. denoise, 3. normalise speech
-      # loudness. Denoise before loudnorm so the gate sees the original levels.
-      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05"
-      local dn
+      # 1. mute the PipeWire capture-open pop and cut rumble, 2. denoise
+      # (blended, tone-corrected), 3. normalise speech loudness in two passes:
+      # linear gain sounds natural, the single-pass dynamic mode pumps.
+      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05,highpass=f=80"
+      local dn ln
       dn=$(denoise_filter "$engine")
       [[ -n $dn ]] && chain+=",$dn"
-      chain+=",loudnorm=I=-16:TP=-1.5:LRA=11"
+      if ln=$(loudnorm_measure "$raw" "$chain"); then
+        chain+=",$ln"
+      else
+        log "finalize: loudness measurement failed with $engine, trying next"
+        continue
+      fi
       # loudnorm upsamples internally; pin the output back to 48 kHz.
       args+=(-af "$chain" -ar 48000 -c:a aac -b:a 160k)
     fi
@@ -721,16 +863,34 @@ append_index() {
 
 html_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' <<<"$1"; }
 
+# Served as text/html, inline — chat apps (Slack, Teams…) then unfurl it as a
+# page with a poster and a video, not as a file, and a click opens the player.
+PAGE_HEADERS=(--header-upload "Content-Type: text/html; charset=utf-8" --header-upload "Content-Disposition: inline" --header-upload "Cache-Control: public, max-age=300")
+
+# player_page <video_url> <poster_url> <title> [local video for dimensions] [page_url]
 player_page() {
-  local video_url="$1" poster_url="$2" title
+  local video_url="$1" poster_url="$2" title w=1920 h=1080 dur="" page_url="${5:-}"
   title=$(html_escape "$3")
+  if [[ -n ${4:-} && -f $4 ]]; then
+    read -r w h <<<"$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$4" | tr ',' ' ')"
+    dur=$(video_duration "$4")
+  fi
+  local desc="Screen recording"
+  [[ -n $dur ]] && desc="Screen recording · $((dur / 60)):$(printf '%02d' $((dur % 60)))"
   cat <<HTML
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
 <title>$title</title>
 <meta property="og:type" content="video.other"><meta property="og:title" content="$title">
-<meta property="og:image" content="$poster_url"><meta property="og:video" content="$video_url">
+<meta property="og:description" content="$desc">${page_url:+<meta property="og:url" content="$page_url">}
+<meta property="og:image" content="$poster_url"><meta property="og:image:width" content="960">
+<meta property="og:video" content="$video_url"><meta property="og:video:url" content="$video_url">
+<meta property="og:video:secure_url" content="$video_url"><meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="$w"><meta property="og:video:height" content="$h">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="$title">
+<meta name="twitter:image" content="$poster_url">
 <style>
   html,body{margin:0;height:100%;background:#0f1115;color:#e6e6e6;font:15px/1.4 system-ui,sans-serif}
   main{max-width:1280px;margin:0 auto;padding:24px 16px}
@@ -795,6 +955,8 @@ upload_video() {
   local progress_log="$RUNTIME_DIR/rclone.log"
   : >"$progress_log"
   rclone copyto "$video" "$remote_video" --stats 1s --stats-one-line --stats-log-level NOTICE \
+    --header-upload "Content-Type: video/mp4" --header-upload "Content-Disposition: inline" \
+    --header-upload "Cache-Control: public, max-age=31536000" \
     --s3-no-check-bucket --ignore-times >"$progress_log" 2>&1 &
   local rpid=$!
   while kill -0 "$rpid" 2>/dev/null; do
@@ -818,13 +980,14 @@ upload_video() {
     video_url=$(rclone link "$remote_video" 2>>"$LOG_FILE") || return 1
   fi
 
-  [[ -n $thumb && -f $thumb ]] && rclone copyto "$thumb" "$remote/$id.jpg" -q 2>>"$LOG_FILE" || true
+  [[ -n $thumb && -f $thumb ]] && rclone copyto "$thumb" "$remote/$id.jpg" -q \
+    --header-upload "Content-Type: image/jpeg" --header-upload "Content-Disposition: inline" 2>>"$LOG_FILE" || true
 
   if [[ -n $base && $(cfg '.upload.playerPage' true) == true ]]; then
     local page="$RUNTIME_DIR/$id.html"
     [[ -n $title ]] || title="Recording $(date -r "$video" '+%Y-%m-%d %H:%M')"
-    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" >"$page"
-    if rclone copyto "$page" "$remote/$id.html" -q 2>>"$LOG_FILE"; then
+    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" "$video" "$base/$id.html" >"$page"
+    if rclone copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2>>"$LOG_FILE"; then
       page_url="$base/$id.html"
     fi
     rm -f "$page"
@@ -901,8 +1064,8 @@ cmd_rename() {
     id=$(jq -r '.id // empty' <<<"$entry")
     [[ -n $id ]] || id=$(basename "${file%.mp4}")
     local page="$RUNTIME_DIR/$id.html"
-    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" >"$page"
-    rclone copyto "$page" "$(remote_path)/$id.html" -q 2>>"$LOG_FILE" || log "player page refresh failed for $id"
+    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" "$new" "$base/$id.html" >"$page"
+    rclone copyto "$page" "$(remote_path)/$id.html" -q "${PAGE_HEADERS[@]}" 2>>"$LOG_FILE" || log "player page refresh failed for $id"
     rm -f "$page"
   fi
   echo "$new"
