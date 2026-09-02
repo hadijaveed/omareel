@@ -803,16 +803,17 @@ if not key or not secret:
     if not (cp.has_option(remote, "access_key_id") and cp.has_option(remote, "secret_access_key")):
         print("access key and secret are required the first time", file=sys.stderr)
         sys.exit(1)
+# No canned ACL: Backblaze's S3 layer rejects "private" (InvalidArgument),
+# and the bucket's own policy decides visibility anyway.
 values = {
     "type": "s3",
     "provider": os.environ["RPROVIDER"],
     "no_check_bucket": "true",
-    "acl": "private",
 }
 if key and secret:
     values["access_key_id"] = key
     values["secret_access_key"] = secret
-for k in ("endpoint", "region"):
+for k in ("endpoint", "region", "acl"):
     if cp.has_option(remote, k):
         cp.remove_option(remote, k)
 if os.environ["ENDPOINT"]:
@@ -868,8 +869,9 @@ cmd_remote_test() {
     fi
   else
     local link
-    if link=$(rclone link "$remote/$name" 2>&1); then
+    if link=$(rclone link "$remote/$name" 2>&1 | grep -v 'NOTICE:'); then
       echo "share link ok → $link"
+      echo "note: without a public URL, links are pre-signed and expire after 7 days"
     else
       echo "rclone link failed: $(tail -1 <<<"$link")"
       rclone deletefile "$remote/$name" -q 2>/dev/null
