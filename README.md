@@ -1,7 +1,7 @@
 # Omareel
 
 Loom-style screen recording for [Omarchy](https://omarchy.org). Record an
-**area**, a **window**, or your **screen** with an optional webcam bubble and
+**area**, a **window**, or your **screen** with an optional camera frame and
 the microphone you choose, get the background noise removed, and decide per
 video whether it stays local or goes up as a shareable link, with a title.
 
@@ -30,12 +30,13 @@ upload it, or copy its link or path:
 - **Record** an area (drag, or click a window to snap to it), a single window
   (via the portal picker, so it stays captured even when covered), or the
   focused monitor. GPU encoding through `gpu-screen-recorder`.
-- **Webcam bubble** in the corner of the recording, any camera, three sizes.
-  In Area and Screen recordings it is a small window on the screen that the
-  capture picks up. In Window recordings the camera is recorded to its own
-  file and composited in as a round bubble after Stop; a live self-view
-  floats in the corner meanwhile so you can see yourself (it is not part of
-  the window capture).
+- **Camera frame** in any corner of the recording: a rounded 16:9 frame
+  (the Loom look), a circle, or a portrait card, in four sizes, any camera.
+  In Area and Screen recordings it is a transparent window placed in the
+  chosen corner *of the recorded region* so the capture picks it up. In
+  Window recordings the camera is recorded to its own file and composited
+  into that corner after Stop; the same frame floats on screen meanwhile so
+  you can see yourself (it is not part of the window capture).
 - **Pick your microphone** and your system-audio source from dropdowns.
 - **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
   track after the recording, blended so the voice keeps its body, tone
@@ -111,8 +112,9 @@ the last link (Discard while recording) · middle-click → open the recordings
 folder.
 
 **Launcher:** pick Area / Window / Screen. Toggle the microphone, system audio
-and camera bubble and pick devices underneath each. Toggle noise removal and
-automatic upload. The gear opens settings.
+and camera and pick devices underneath each; the camera row also sets the
+frame size, shape and corner. Toggle noise removal and automatic upload. The
+gear opens settings.
 
 **After Stop:** the floating banner (and the launcher) show the finished
 recording with **Upload**, **Rename**, **Open** and **Copy**. Upload asks for
@@ -158,15 +160,18 @@ makes it safe to keep in a dotfiles repo.
 
 ## Noise removal
 
-The chain is: cut rumble below 80 Hz → denoise → high shelf (−2.5 dB above
-4 kHz) → two-pass `loudnorm` to −16 LUFS. RNNoise at full strength thins a
-voice out and makes it sound shrill (measured on a real take: spectral
-centroid 2.7 → 3.4 kHz, +2 dB above 3 kHz), so by default only 70 % of the
-denoised signal is used and the shelf pulls the top back to where the raw
-take was, within half a decibel across the bands. **Strength** in settings
-moves this: *Light* (50 %) for the most natural voice, *Strong* (100 %) for
-noisy rooms. Two-pass loudness normalisation applies one linear gain instead
-of the single-pass dynamic mode, which pumps and exaggerates sibilance.
+The chain is: cut rumble below 80 Hz → denoise → tone correction → two-pass
+`loudnorm` to −16 LUFS. RNNoise at full strength thins a voice out and makes
+it sound shrill (measured on a real take: spectral centroid 2.7 → 3.4 kHz,
++2 dB above 3 kHz). Blending the raw signal back in fixes the tone but lets
+the room noise back in with it, so instead the suppression stays at full
+strength and an EQ pair (−3 dB high shelf above 4 kHz, +1.5 dB low shelf
+below 200 Hz) puts the body back; measured against the raw take the bands
+land within half a decibel. **Strength** in settings: *Normal* as above,
+*Light* keeps 30 % of the raw signal for the most natural voice in a quiet
+room, *Strong* is full suppression without the low-shelf lift for very noisy
+rooms. Two-pass loudness normalisation applies one linear gain instead of the
+single-pass dynamic mode, which pumps and exaggerates sibilance.
 
 The engine setting `auto` picks, in order:
 
@@ -216,12 +221,15 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "quality": "very_high",     // medium | high | very_high | ultra
   "mic": true,          "micDevice": "default",
   "desktopAudio": false, "desktopDevice": "default",
-  "webcam": false,       "webcamDevice": "auto", "webcamSize": "medium",
-  "webcamMode": "auto",       // auto: on-screen bubble for Area/Screen, composited for Window | composite: always composited
+  "webcam": false,       "webcamDevice": "auto",
+  "webcamSize": "medium",     // small | medium | large | xlarge (16/22/30/40 % of the recording height)
+  "webcamShape": "frame",     // frame (16:9, rounded) | circle | portrait (8:9 card)
+  "webcamCorner": "bottom-right", // bottom-left | top-right | top-left
+  "webcamMode": "auto",       // auto: on-screen frame for Area/Screen, composited for Window | composite: always composited
   "denoise": true,
   "denoiseEngine": "auto",    // auto | ladspa | arnndn | afftdn | off
   "denoiseModel": "bd",       // arnndn model: bd (general) | sh (speech)
-  "denoiseStrength": "normal", // light | normal | strong (how much of the denoised signal is used)
+  "denoiseStrength": "normal", // light (30 % raw blended back) | normal (full + EQ) | strong (full, no low lift)
   "vadThreshold": 50,         // LADSPA gate, %; lower if word starts get clipped
   "keepRaw": true,
   "upload": {
@@ -241,13 +249,13 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
 launcher / keybind / menu
         │
         ▼
-bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv webcam bubble
+bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv camera frame (transparent, masked)
                              (Window mode: ffmpeg records the camera to <id>.cam.mp4)
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
         ├─ ffmpeg: trim pop → highpass → denoise (blend + shelf) → 2-pass loudnorm → +faststart
-        │          + round camera bubble overlay when a camera take exists
+        │          + camera frame overlay (shape/corner/size) when a camera take exists
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
@@ -270,11 +278,11 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
   covers the top-centre spot.
 - **A camera can only stream to one program at a time.** If Chromium,
   Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
-  was granted the camera), the bubble cannot start. Omareel says so in the
+  was granted the camera), the camera cannot start. Omareel says so in the
   launcher ("In use by Chromium") and in a notification, and records without
-  the bubble. End the call or close that tab, then record again.
+  the camera. End the call or close that tab, then record again.
 - Window recordings with the camera on are re-encoded once to composite the
-  bubble, so they take a few extra seconds to finish. The camera take is kept
+  camera frame, so they take a few extra seconds to finish. The camera take is kept
   as `<id>.cam.mp4` next to the raw file while *Keep raw* is on.
 - Window mode uses the xdg-desktop-portal picker. If it fails on your GPU,
   use Area and click the window: the picker snaps to it.

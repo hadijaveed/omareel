@@ -63,6 +63,8 @@ default_config() {
   "webcam": false,
   "webcamDevice": "auto",
   "webcamSize": "medium",
+  "webcamShape": "frame",
+  "webcamCorner": "bottom-right",
   "webcamMode": "auto",
   "denoise": true,
   "denoiseEngine": "auto",
@@ -302,9 +304,26 @@ start_webcam_capture() {
     ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
       -use_wallclock_as_timestamps 1 -i "$device" "${encode[@]}" \
       -f tee "[f=mp4:onfail=ignore]$out|[f=nut:onfail=ignore]pipe:1" \
-      2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut \
-        '--vf=lavfi=[crop=ih*8/9:ih]' --title="WebcamOverlay" --wayland-app-id="WebcamOverlay-$bubble_size" \
+      2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
+        "$(overlay_vf "$(cfg .webcamShape frame)" "${size#*x}")" --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
         --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
+    ( # put the self-view in the chosen corner once its window exists; say so if it never does
+      local n placed=false
+      for n in $(seq 60); do
+        sleep 0.1
+        if place_overlay "$(overlay_class "$bubble_size")" "$bubble_size" "$(cfg .webcamShape frame)" "$(cfg .webcamCorner bottom-right)"; then
+          placed=true
+          break
+        fi
+      done
+      if [[ $placed == true ]]; then
+        log "webcam self-view shown ($(hyprctl -j clients | jq -c 'first(.[] | select(.title == "WebcamOverlay")) | {at, size, ws: .workspace.id}' 2>/dev/null))"
+      else
+        log "webcam self-view window did not appear within 6 s (mpv output above)"
+        notify -u normal -t 6000 "Omareel: camera self-view did not appear" "The camera is still being recorded and will be in the video. See $LOG_FILE"
+      fi
+    ) &
+    disown
   else
     ffmpeg -y -v error -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
       -use_wallclock_as_timestamps 1 -i "$device" "${encode[@]}" -f mp4 "$out" >>"$LOG_FILE" 2>&1 &
@@ -336,6 +355,9 @@ webcam_capture_alive() {
   [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
 }
 
+# Hyprland's stock rules float/pin classes WebcamOverlay-small|medium|large only.
+overlay_class() { case "$1" in small | medium | large) echo "WebcamOverlay-$1" ;; *) echo "WebcamOverlay-large" ;; esac; }
+
 start_webcam_overlay() {
   local device="$1" size="$2" region="$3"
   cleanup_webcam
@@ -354,18 +376,22 @@ start_webcam_overlay() {
     fi
   done
 
+  local shape corner cam_h=720
+  shape=$(cfg .webcamShape frame)
+  corner=$(cfg .webcamCorner bottom-right)
+  [[ $capture_options == video_size=*x* ]] && cam_h=$(sed -E 's/^video_size=[0-9]+x([0-9]+).*/\1/' <<<"$capture_options")
   mpv "av://v4l2:$device" \
-    --profile=low-latency --untimed --no-cache \
+    --profile=low-latency --untimed --no-cache --background=none \
     --demuxer-lavf-o="$capture_options" \
-    '--vf=lavfi=[crop=ih*8/9:ih]' \
-    --title="WebcamOverlay" --wayland-app-id="WebcamOverlay-$size" \
+    "$(overlay_vf "$shape" "$cam_h")" \
+    --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$size")" \
     --no-border --no-audio --no-osc --osd-level=0 \
     --msg-level=all=warn >>"$LOG_FILE" 2>&1 &
   echo $! >"$OVERLAY_PID_FILE"
 
   local waited=0 mpv_pid
   mpv_pid=$(cat "$OVERLAY_PID_FILE")
-  while ((waited < 80)) && kill -0 "$mpv_pid" 2>/dev/null && ! hyprctl clients -j | jq -e --arg c "WebcamOverlay-$size" \
+  while ((waited < 80)) && kill -0 "$mpv_pid" 2>/dev/null && ! hyprctl clients -j | jq -e --arg c "$(overlay_class "$size")" \
     'any(.[]; .title == "WebcamOverlay" and .class == $c)' >/dev/null 2>&1; do
     sleep 0.05
     ((waited++))
@@ -377,8 +403,8 @@ start_webcam_overlay() {
   fi
 
   [[ -n $region ]] && echo "$region" >"$WEBCAM_REGION_FILE"
-  omarchy-capture-webcam-resize "$size" 2>/dev/null || true
-  sleep 0.6
+  place_overlay "$(overlay_class "$size")" "$size" "$shape" "$corner" "$region" || log "webcam overlay: could not place window"
+  sleep 0.4
 }
 
 cleanup_webcam() {
@@ -788,22 +814,28 @@ denoise_engine() {
 # which is what "shrill" sounds like; 70 % keeps the body of the voice.
 denoise_mix() {
   case "$(cfg .denoiseStrength normal)" in
-  light) echo 0.5 ;;
-  strong) echo 1.0 ;;
-  *) echo 0.7 ;;
+  light) echo 0.7 ;; # lets ~30 % of the room through; most natural voice
+  *) echo 1.0 ;;     # full suppression; the EQ below restores the body
   esac
 }
 
-# Applied after every denoiser: pull the top back to where the raw take was.
-DENOISE_TONE="highshelf=f=4000:g=-2.5"
+# Applied after every denoiser: pull the top back and the body up to where the
+# raw take was (measured: full RNNoise + this shelf pair lands within 0.5 dB).
+denoise_tone() {
+  case "$(cfg .denoiseStrength normal)" in
+  light) echo "highshelf=f=4000:g=-2.5" ;;
+  strong) echo "highshelf=f=4000:g=-3" ;;
+  *) echo "highshelf=f=4000:g=-3,lowshelf=f=200:g=1.5" ;;
+  esac
+}
 
 denoise_filter() {
   case "$1" in
   ladspa)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0,$DENOISE_TONE"
+    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0,$(denoise_tone)"
     ;;
   arnndn)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)"):mix=$(denoise_mix),$DENOISE_TONE"
+    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)"):mix=$(denoise_mix),$(denoise_tone)"
     ;;
   afftdn)
     echo "afftdn=nr=10:nf=-30:tn=1"
@@ -824,12 +856,63 @@ loudnorm_measure() {
   echo "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=$mi:measured_TP=$mt:measured_LRA=$ml:measured_thresh=$mth:offset=$off:linear=true"
 }
 
-# Round camera bubble for the composite path. bubble_filter <video-h> <size> <delta-s>
+# The camera picture: frame (whole 16:9 image, rounded corners), circle, or
+# portrait (8:9, rounded). Same geometry on screen and in the composite.
+# bubble_size <anchor-height> <size> <shape> -> "w h" in the anchor's pixels
+bubble_size() {
+  local anchor_h="$1" size="$2" shape="$3" h w
+  case "$size" in
+  small) h=$((anchor_h * 16 / 100)) ;;
+  large) h=$((anchor_h * 30 / 100)) ;;
+  xlarge) h=$((anchor_h * 40 / 100)) ;;
+  *) h=$((anchor_h * 22 / 100)) ;;
+  esac
+  case "$shape" in
+  circle) w=$h ;;
+  portrait) w=$((h * 8 / 9)) ;;
+  *) w=$((h * 16 / 9)) ;;
+  esac
+  echo "$((w / 2 * 2)) $((h / 2 * 2))"
+}
+
+# crop filter that gives the shape its aspect from the camera's frame
+bubble_crop() {
+  case "$1" in
+  circle) echo "crop=min(iw\,ih):min(iw\,ih)," ;;
+  portrait) echo "crop=ih*8/9:ih," ;;
+  *) echo "" ;;
+  esac
+}
+
+# geq that keeps colour and cuts an anti-aliased rounded-rectangle alpha with
+# corner radius <r> (in the filtered frame's pixels; r = H/2 on a square = circle)
+bubble_mask() {
+  local r="$1"
+  printf "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*clip(%s-sqrt(pow(max(abs(X-W/2)-(W/2-%s)\,0)\,2)+pow(max(abs(Y-H/2)-(H/2-%s)\,0)\,2))+0.5\,0\,1)'" "$r" "$r" "$r"
+}
+
+# radius for a frame of height h and the given shape
+bubble_radius() {
+  local h="$1" shape="$2"
+  case "$shape" in circle) echo $((h / 2)) ;; *) echo $((h * 8 / 100)) ;; esac
+}
+
+# overlay position expression for a corner, given margin m
+bubble_position() {
+  local corner="$1" m="$2"
+  case "$corner" in
+  top-left) echo "$m:$m" ;;
+  top-right) echo "W-w-$m:$m" ;;
+  bottom-left) echo "$m:H-h-$m" ;;
+  *) echo "W-w-$m:H-h-$m" ;;
+  esac
+}
+
+# Composite path. bubble_filter <video-h> <size> <shape> <corner> <delta-s>
 # Output pad [cam]: RGBA, transparent until the camera's first frame.
 bubble_filter() {
-  local h="$1" size="$2" delta="$3" d m
-  case "$size" in small) d=$((h * 16 / 100)) ;; large) d=$((h * 30 / 100)) ;; *) d=$((h * 22 / 100)) ;; esac
-  d=$((d / 2 * 2))
+  local h="$1" size="$2" shape="$3" corner="$4" delta="$5" w bh m
+  read -r w bh <<<"$(bubble_size "$h" "$size" "$shape")"
   m=$((h * 3 / 100))
   local timing
   if awk -v d="$delta" 'BEGIN{exit !(d >= 0)}'; then
@@ -837,8 +920,54 @@ bubble_filter() {
   else
     timing="trim=start=$(awk -v d="$delta" 'BEGIN{printf "%.3f", -d}'),setpts=PTS-STARTPTS"
   fi
-  printf '[1:v]crop=min(iw\,ih):min(iw\,ih),scale=%d:%d,format=rgba,geq=r=%s:g=%s:b=%s:a=%s,%s[cam];[0:v][cam]overlay=W-w-%d:H-h-%d:eof_action=pass:format=auto[v]' \
-    "$d" "$d" "'r(X,Y)'" "'g(X,Y)'" "'b(X,Y)'" "'255*clip(W/2-sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))+0.5,0,1)'" "$timing" "$m" "$m"
+  printf '[1:v]%sscale=%d:%d,%s,%s[cam];[0:v][cam]overlay=%s:eof_action=pass:format=auto[v]' \
+    "$(bubble_crop "$shape")" "$w" "$bh" "$(bubble_mask "$(bubble_radius "$bh" "$shape")")" "$timing" "$(bubble_position "$corner" "$m")"
+}
+
+# Place the on-screen camera window (mpv, found by class) in the chosen corner
+# of the anchor: the recorded region "WxH+X+Y", or the focused monitor.
+# place_overlay <class> <size> <shape> <corner> [region]
+place_overlay() {
+  local class="$1" size="$2" shape="$3" corner="$4" region="${5:-}" addr ax ay aw ah
+  addr=$(hyprctl -j clients | jq -r --arg c "$class" 'first(.[] | select(.class == $c and .title == "WebcamOverlay")) | .address // empty')
+  [[ -n $addr ]] || return 1
+  if [[ $region =~ ^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$ ]]; then
+    aw=${BASH_REMATCH[1]} ah=${BASH_REMATCH[2]} ax=${BASH_REMATCH[3]} ay=${BASH_REMATCH[4]}
+  else
+    read -r ax ay aw ah <<<"$(hyprctl -j monitors | jq -r 'first(.[] | select(.focused)) | . as $m
+      | (if ($m.transform % 2) == 1 then [$m.height, $m.width] else [$m.width, $m.height] end) as $d
+      | "\($m.x) \($m.y) \(($d[0] / $m.scale) | floor) \(($d[1] / $m.scale) | floor)"')"
+  fi
+  [[ -n ${aw:-} ]] || return 1
+  local w h m x y
+  read -r w h <<<"$(bubble_size "$ah" "$size" "$shape")"
+  m=$((ah * 3 / 100))
+  case "$corner" in
+  top-left) x=$((ax + m)); y=$((ay + m)) ;;
+  top-right) x=$((ax + aw - w - m)); y=$((ay + m)) ;;
+  bottom-left) x=$((ax + m)); y=$((ay + ah - h - m)) ;;
+  *) x=$((ax + aw - w - m)); y=$((ay + ah - h - m)) ;;
+  esac
+  hypr_dispatch "hl.dsp.window.resize({ window = \"address:$addr\", x = $w, y = $h })" \
+    resizewindowpixel "exact $w $h,address:$addr" || return 1
+  hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", x = $x, y = $y })" \
+    movewindowpixel "exact $x $y,address:$addr"
+}
+
+# hypr_dispatch <lua-call> <legacy-dispatcher> <legacy-args>: Hyprland 0.56+
+# only accepts the Lua form; older releases only the legacy one.
+hypr_dispatch() {
+  local lua="$1"
+  shift
+  hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null 2>&1
+}
+
+# mpv video filter for the on-screen window: shape crop + transparent mask,
+# radius in camera pixels (the window is scaled to bubble_size afterwards).
+overlay_vf() {
+  local shape="$1" cam_h="${2:-720}" r
+  case "$shape" in circle) r=$((cam_h / 2)) ;; *) r=$((cam_h * 8 / 100)) ;; esac
+  printf -- '--vf=lavfi=[%s%s]' "$(bubble_crop "$shape")" "$(bubble_mask "$r")"
 }
 
 # finalize_video raw out denoise(true|false)
@@ -878,7 +1007,7 @@ finalize_video() {
     height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$raw")
     if [[ -n $cam_start && -n $raw_start && -n $height ]]; then
       delta=$(awk -v c="$cam_start" -v r="$raw_start" 'BEGIN{printf "%.3f", c - r - 0.1}')
-      cam_filter=$(bubble_filter "$height" "$(cfg .webcamSize medium)" "$delta")
+      cam_filter=$(bubble_filter "$height" "$(cfg .webcamSize medium)" "$(cfg .webcamShape frame)" "$(cfg .webcamCorner bottom-right)" "$delta")
       cam_args=(-i "$cam")
       video_codec=(-filter_complex "$cam_filter" -map "[v]" -map "0:a?" -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
       log "finalize: compositing camera bubble (delta ${delta}s)"
@@ -1002,7 +1131,7 @@ player_page() {
 </style></head><body><main>
 <video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video>
 <h1>$title</h1>
-<p class="meta">Recorded with Omareel · <a href="$video_url" download>Download</a></p>
+<p class="meta">Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
 </main></body></html>
 HTML
 }

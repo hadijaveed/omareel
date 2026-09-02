@@ -568,7 +568,7 @@ Panel {
             Button {
               iconText: "󰖯"
               text: "Window"
-              tooltipText: "Pick an app; it stays captured even when covered (no webcam bubble)"
+              tooltipText: "Pick an app; it stays captured even when covered (camera is composited in after Stop)"
               onClicked: root.start("window")
             }
             Button {
@@ -620,10 +620,10 @@ Panel {
 
             Toggle {
               width: parent.width
-              label: "Camera bubble"
+              label: "Camera"
               description: root.webcamOn
                 ? (Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
-                   ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — end that call or tab, or the bubble is skipped"
+                   ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — end that call or tab, or the camera is skipped"
                    : Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium"))
                 : "Off — puts you in the corner of the video"
               checked: root.webcamOn
@@ -647,7 +647,8 @@ Panel {
                 options: [
                   { value: "small", label: "Small" },
                   { value: "medium", label: "Medium" },
-                  { value: "large", label: "Large" }
+                  { value: "large", label: "Large" },
+                  { value: "xlarge", label: "Extra large" }
                 ]
                 value: String(Omareel.get(root.config, "webcamSize", "medium"))
                 onChanged: function(v) { root.setConfig("webcamSize", v) }
@@ -666,6 +667,32 @@ Panel {
               description: "RNNoise clean-up of the microphone after recording"
               checked: root.denoiseOn
               onClicked: root.setConfig("denoise", !root.denoiseOn)
+            }
+            Row {
+              visible: root.webcamOn
+              width: parent.width
+              spacing: Style.space(6)
+              Dropdown {
+                width: (parent.width - Style.space(6)) / 2
+                options: [
+                  { value: "frame", label: "Frame (16:9, rounded)" },
+                  { value: "circle", label: "Circle" },
+                  { value: "portrait", label: "Portrait (8:9)" }
+                ]
+                value: String(Omareel.get(root.config, "webcamShape", "frame"))
+                onChanged: function(v) { root.setConfig("webcamShape", v) }
+              }
+              Dropdown {
+                width: (parent.width - Style.space(6)) / 2
+                options: [
+                  { value: "bottom-right", label: "Bottom right" },
+                  { value: "bottom-left", label: "Bottom left" },
+                  { value: "top-right", label: "Top right" },
+                  { value: "top-left", label: "Top left" }
+                ]
+                value: String(Omareel.get(root.config, "webcamCorner", "bottom-right"))
+                onChanged: function(v) { root.setConfig("webcamCorner", v) }
+              }
             }
             Toggle {
               width: parent.width
