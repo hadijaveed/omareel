@@ -443,7 +443,7 @@ Panel {
               onClicked: root.start("area")
             }
             Button {
-              iconText: "󰒓"
+              iconText: "󰖯"
               text: "Window"
               tooltipText: "Pick an app; it stays captured even when covered (no webcam bubble)"
               onClicked: root.start("window")
