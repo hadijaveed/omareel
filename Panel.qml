@@ -29,7 +29,8 @@ Item {
   property var state: ({ phase: "idle" })
   property int nowSec: Math.floor(Date.now() / 1000)
   property bool dismissed: false
-  property bool titling: false      // Upload pressed → title field shown
+  property bool titling: false      // Upload/Rename pressed → title field shown
+  property string titleAction: "upload" // upload | rename
   property var targetScreen: null
 
   readonly property string phase: Omareel.phaseOf(state)
@@ -54,10 +55,15 @@ Item {
 
   function cliRun(args) { Util.execArgv([root.cli].concat(args)) }
 
-  function startUpload() {
+  function promptTitle(action) {
+    titleAction = action
+    titling = true
+  }
+  function submitTitle() {
     var title = titleField.text.trim()
     titling = false
-    cliRun(["upload", "last", "--title=" + title])
+    if (titleAction === "rename") { if (title) cliRun(["rename", "last", title]) }
+    else cliRun(["upload", "last", "--title=" + title])
   }
 
   onPhaseChanged: {
@@ -179,18 +185,18 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           visible: root.titling
           width: Style.space(260)
-          placeholderText: "Title for the video (optional)"
-          onVisibleChanged: if (visible) { text = ""; forceActiveFocus() }
-          onAccepted: root.startUpload()
+          placeholderText: root.titleAction === "rename" ? "New name for the video" : "Title for the video (optional)"
+          onVisibleChanged: if (visible) { text = String(root.state.title || ""); selectAll(); forceActiveFocus() }
+          onAccepted: root.submitTitle()
           Keys.onEscapePressed: root.titling = false
         }
         Button {
           anchors.verticalCenter: parent.verticalCenter
           visible: root.titling
-          iconText: "󰅧"
-          text: "Upload"
+          iconText: root.titleAction === "rename" ? "󰆓" : "󰅧"
+          text: root.titleAction === "rename" ? "Save" : "Upload"
           active: true
-          onClicked: root.startUpload()
+          onClicked: root.submitTitle()
         }
         Button {
           anchors.verticalCenter: parent.verticalCenter
@@ -206,7 +212,14 @@ Item {
           text: "Upload"
           tooltipText: "Upload and copy a share link"
           active: true
-          onClicked: root.titling = true
+          onClicked: root.promptTitle("upload")
+        }
+        Button {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.finished && !root.titling
+          iconText: "󰏫"
+          tooltipText: "Rename the video files"
+          onClicked: root.promptTitle("rename")
         }
 
         Button {

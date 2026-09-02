@@ -15,7 +15,14 @@ While recording, a small floating bar sits at the top of the screen:
 <p align="center">
   <img src="docs/recording-bar.png" width="430" alt="● 00:03 · Area 1600x900  Stop  Discard">
   <br>
-  <img src="docs/done-bar.png" width="520" alt="✓ Saved · upload to share  Upload  Open  Copy">
+  <img src="docs/done-bar.png" width="560" alt="✓ Saved · upload to share  Upload  Rename  Open  Copy">
+</p>
+
+The Recordings page lists every take, newest first; click one to rename it,
+upload it, or copy its link or path:
+
+<p align="center">
+  <img src="docs/recordings.png" width="360" alt="Recordings: Sprint demo · Today 13:08 · 0:03 · Local">
 </p>
 
 ## What it does
@@ -33,6 +40,11 @@ While recording, a small floating bar sits at the top of the screen:
   give the video a title and the link lands on your clipboard. Everything
   else stays in `~/Videos/Omareel`. Flip *Upload every recording* in the
   launcher if you would rather have every take uploaded automatically.
+- **Name your videos.** A recording is saved under a random UUID. Rename it
+  from the banner, the launcher, or the Recordings page and the mp4,
+  thumbnail and raw take move together (`Sprint demo: API v2` →
+  `Sprint-demo-API-v2.mp4`). The UUID stays the object key on the upload
+  destination, so links never change and are never guessable.
 - **Destinations:** Cloudflare R2, AWS S3, Backblaze B2, any S3-compatible
   endpoint, or any rclone remote you already have. A small player page
   (titled with your title) is uploaded next to the video.
@@ -97,12 +109,18 @@ and camera bubble and pick devices underneath each. Toggle noise removal and
 automatic upload. The gear opens settings.
 
 **After Stop:** the floating banner (and the launcher) show the finished
-recording with **Upload**, **Open** and **Copy**. Upload asks for a title,
-uploads the video, thumbnail and player page, and copies the link. The banner
-stays until you upload it, close it (✕), or start the next recording; ✕ keeps
-the file local. `omareel upload last --title="…"` and
-`omareel upload <file.mp4>` do the same from a terminal, so older recordings
-can be shared later too.
+recording with **Upload**, **Rename**, **Open** and **Copy**. Upload asks for
+a title, renames the files to it, uploads the video, thumbnail and player
+page, and copies the link. Rename only renames. The banner stays until you
+upload it, close it (✕), or start the next recording; ✕ keeps the file local.
+
+**Recordings page:** the *Recordings* button in the launcher (or
+`omarchy-shell omareel recordings`) lists everything in `index.jsonl`. Click
+a row for a name field plus Upload / Copy link or path / Open. Renaming a
+video that is already shared re-uploads its player page with the new title.
+
+The same from a terminal: `omareel upload last --title="…"`,
+`omareel rename <file.mp4> "…"`, `omareel copy <file.mp4>`.
 
 **Keyboard:** `omareel toggle` opens the launcher when idle and stops the
 recording when one is running.
@@ -121,8 +139,8 @@ back through the public URL, and deletes it.
 | **S3-compatible** | Endpoint URL, bucket, key + secret, public URL. MinIO, Wasabi, Hetzner, etc. |
 | **Existing rclone remote** | A `remote:path` you already configured with `rclone config` (Google Drive, Dropbox, OneDrive…). Leave the public URL empty and the share link comes from `rclone link`. |
 
-The bucket must allow public reads of the uploaded objects. File names are a
-timestamp plus a random suffix, so links are not guessable.
+The bucket must allow public reads of the uploaded objects. Objects are named
+by the recording's UUID, so links are not guessable and survive local renames.
 
 Credentials are stored by `omareel remote save` in
 `~/.config/rclone/rclone.conf` (mode 600) under the `[omareel]` remote.
@@ -149,6 +167,8 @@ can always be redone with `omareel finalize <raw.mp4>`.
 omareel start [area|window|screen] [--no-mic] [--desktop-audio] [--webcam] [--no-denoise] [--no-upload]
 omareel stop | cancel | dismiss | toggle | status | last | open
 omareel upload last|<video.mp4> [--title="…"]   # share one recording
+omareel rename last|<video.mp4> "<title>"        # rename mp4 + thumbnail + raw
+omareel copy   last|<video.mp4>                  # copy its link, or path if local
 omareel devices                      # JSON: mics, outputs, cameras
 omareel doctor                       # JSON: deps, active denoiser, upload state
 omareel config get | merge '<json>'  # read / deep-merge omareel.json
@@ -156,7 +176,7 @@ omareel remote save|status|test      # upload credentials → rclone.conf
 omareel finalize <raw.mp4> [out.mp4]
 omareel setup [--link]
 
-omarchy-shell omareel open|close|toggle|settings|status|refresh
+omarchy-shell omareel open|close|toggle|settings|recordings|status|refresh
 ```
 
 Headless smoke test (no picker):
@@ -205,7 +225,7 @@ bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv webcam bub
         ▼
 bin/omareel stop
         ├─ ffmpeg: trim pop → denoise → loudnorm → +faststart
-        ├─ thumbnail, index.jsonl
+        ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
         ▼

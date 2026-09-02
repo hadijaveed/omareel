@@ -16,6 +16,8 @@
 #                 [--no-denoise] [--no-upload] [--region=WxH+X+Y]
 #   omareel stop | cancel | dismiss | toggle | status | last | open | menu
 #   omareel upload last|<video.mp4> [--title="…"]   # share one recording
+#   omareel rename last|<video.mp4> "<title>"        # rename the local files (+ thumbnail, raw)
+#   omareel copy   last|<video.mp4>                  # copy its link, or path if local
 #   omareel devices                      # JSON: mics, outputs, cameras
 #   omareel doctor                       # JSON: deps, denoiser in use, upload state
 #   omareel config get | merge '<json>'  # read / deep-merge omareel.json
@@ -267,8 +269,60 @@ pick_area() {
 }
 
 new_id() {
-  # Timestamp for humans + random suffix so public URLs are not guessable.
-  printf '%s_%s' "$(date +'%Y-%m-%d_%H-%M-%S')" "$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
+  # Random UUID: the local file name until it is given a title, and the object
+  # key on the upload destination for good, so links stay unguessable and
+  # survive renames.
+  uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid
+}
+
+# Title → safe file name. "Sprint demo: API v2" → "Sprint-demo-API-v2"
+slugify() {
+  local s
+  s=$(printf '%s' "$1" | sed -E 's/[^[:alnum:] _-]+//g; s/[[:space:]]+/-/g; s/-{2,}/-/g; s/^-+//; s/-+$//')
+  printf '%.80s' "$s"
+}
+
+recording_dir() { expand_home "$(cfg .outputDir "~/Videos/Omareel")"; }
+
+# resolve_recording last|<file> -> absolute path of the mp4 (or fails)
+resolve_recording() {
+  local target="${1:-last}" file=""
+  if [[ $target == last ]]; then
+    file=$(state_get file)
+    [[ -n $file && -f $file ]] || file=$(tail -1 "$(recording_dir)/$INDEX_FILE_NAME" 2>/dev/null | jq -r '.file // empty')
+  else
+    file="$target"
+    [[ $file == /* ]] || file="$PWD/$file"
+  fi
+  [[ -n $file && -f $file ]] || { echo "no such recording: ${file:-$target}" >&2; return 1; }
+  echo "$file"
+}
+
+# rename_recording <file> <title> -> prints the new path. Moves the mp4, its
+# thumbnail and raw take together, updates index.jsonl and the live state.
+rename_recording() {
+  local file="$1" title="$2" dir slug new n=2
+  dir=$(dirname "$file")
+  slug=$(slugify "$title")
+  [[ -n $slug ]] || slug=$(basename "${file%.mp4}")
+  new="$dir/$slug.mp4"
+  if [[ $new != "$file" ]]; then
+    while [[ -e $new || -e ${new%.mp4}.raw.mp4 ]]; do
+      new="$dir/$slug-$n.mp4"
+      n=$((n + 1))
+    done
+    mv "$file" "$new"
+    [[ -f ${file%.mp4}.jpg ]] && mv "${file%.mp4}.jpg" "${new%.mp4}.jpg"
+    [[ -f ${file%.mp4}.raw.mp4 ]] && mv "${file%.mp4}.raw.mp4" "${new%.mp4}.raw.mp4"
+    log "rename $(basename "$file") -> $(basename "$new")"
+  fi
+  index_patch "$file" '.file = $new | .title = $title' --arg new "$new" --arg title "$title"
+  if [[ -f $STATE_FILE && $(state_get file) == "$file" ]]; then
+    jq --arg f "$new" --arg t "$title" '.file = $f | .title = $t' "$STATE_FILE" >"$STATE_FILE.tmp" &&
+      mv "$STATE_FILE.tmp" "$STATE_FILE"
+    omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
+  fi
+  echo "$new"
 }
 
 cmd_start() {
@@ -633,22 +687,34 @@ video_duration() {
   ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null | cut -d. -f1
 }
 
-# index_update <file> <url> <title>
-index_update() {
-  local file="$1" url="$2" title="$3" dir tmp
+# index_patch <file> '<jq filter for the matching entry>' [--arg …]
+index_patch() {
+  local file="$1" filter="$2" dir tmp
+  shift 2
   dir=$(dirname "$file")
   [[ -f $dir/$INDEX_FILE_NAME ]] || return 0
   tmp="$dir/$INDEX_FILE_NAME.tmp"
-  jq -c --arg file "$file" --arg url "$url" --arg title "$title" \
-    'if .file == $file then .url = $url | .title = $title else . end' "$dir/$INDEX_FILE_NAME" >"$tmp" && mv "$tmp" "$dir/$INDEX_FILE_NAME"
+  jq -c --arg file "$file" "$@" "if .file == \$file then ($filter) else . end" \
+    "$dir/$INDEX_FILE_NAME" >"$tmp" && mv "$tmp" "$dir/$INDEX_FILE_NAME"
 }
 
-append_index() {
-  local file="$1" url="$2" dir
+# index_entry <file> -> the entry JSON, or empty
+index_entry() {
+  local file="$1" dir
   dir=$(dirname "$file")
-  jq -nc --arg file "$file" --arg url "$url" --argjson dur "${3:-$(video_duration "$file")}" \
-    --arg target "$(state_get target)" \
-    '{file: $file, url: $url, duration: $dur, target: $target, at: (now | floor)}' >>"$dir/$INDEX_FILE_NAME"
+  [[ -f $dir/$INDEX_FILE_NAME ]] || return 0
+  jq -c --arg file "$file" 'select(.file == $file)' "$dir/$INDEX_FILE_NAME" 2>/dev/null | tail -1
+}
+
+# append_index <file> <url> [id] [title]
+append_index() {
+  local file="$1" url="$2" id="${3:-}" title="${4:-}" dir
+  dir=$(dirname "$file")
+  [[ -n $id ]] || id=$(basename "${file%.mp4}")
+  jq -nc --arg id "$id" --arg file "$file" --arg url "$url" --arg title "$title" \
+    --argjson dur "$(video_duration "$file")" --arg target "$(state_get target)" \
+    '{id: $id, file: $file, title: $title, url: $url, duration: $dur, target: $target, at: (now | floor)}' \
+    >>"$dir/$INDEX_FILE_NAME"
 }
 
 # ---------------------------------------------------------------- upload ---
@@ -705,9 +771,9 @@ remote_path() {
   esac
 }
 
-# upload_video <video> [thumb] [title] -> prints the share URL
+# upload_video <video> [thumb] [title] [id] -> prints the share URL
 upload_video() {
-  local video="$1" thumb="${2:-}" title="${3:-}"
+  local video="$1" thumb="${2:-}" title="${3:-}" id="${4:-}"
   local remote base
   remote=$(remote_path)
   base=$(cfg '.upload.publicBase' "")
@@ -722,8 +788,7 @@ upload_video() {
     return 1
   fi
 
-  local id
-  id=$(basename "${video%.mp4}")
+  [[ -n $id ]] || id=$(basename "${video%.mp4}")
   local remote_video="$remote/$id.mp4"
 
   # Stream progress into the state file so the UI can show a percentage.
@@ -757,7 +822,7 @@ upload_video() {
 
   if [[ -n $base && $(cfg '.upload.playerPage' true) == true ]]; then
     local page="$RUNTIME_DIR/$id.html"
-    [[ -n $title ]] || title="Recording $(sed -E 's/_[a-z0-9]{6}$//; s/_/ /; s/-([0-9]{2})-([0-9]{2})$/:\1:\2/' <<<"$id")"
+    [[ -n $title ]] || title="Recording $(date -r "$video" '+%Y-%m-%d %H:%M')"
     player_page "$base/$id.mp4" "$base/$id.jpg" "$title" >"$page"
     if rclone copyto "$page" "$remote/$id.html" -q 2>>"$LOG_FILE"; then
       page_url="$base/$id.html"
@@ -770,7 +835,7 @@ upload_video() {
 
 # cmd_upload last|<video.mp4> [--title=…]
 cmd_upload() {
-  local target="" title="" arg
+  local target="last" title="" arg
   for arg in "$@"; do
     case "$arg" in
     --title=*) title="${arg#*=}" ;;
@@ -778,33 +843,36 @@ cmd_upload() {
     esac
   done
   local file
-  if [[ -z $target || $target == last ]]; then
-    file=$(state_get file)
-    if [[ -z $file || ! -f $file ]]; then
-      local dir
-      dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
-      file=$(tail -1 "$dir/$INDEX_FILE_NAME" 2>/dev/null | jq -r '.file // empty')
-    fi
-  else
-    file="$target"
-  fi
-  [[ -f $file ]] || { echo "no recording to upload" >&2; return 1; }
+  file=$(resolve_recording "$target") || return 1
   if ! upload_ready; then
     notify -u critical -t 5000 "Omareel: no upload destination" "Finish the Sharing section in settings first"
     return 1
   fi
 
+  # The object key is the recording's id (a UUID for new recordings, the old
+  # file name for recordings made before ids existed); renames do not move it.
+  local entry id
+  entry=$(index_entry "$file")
+  if [[ -z $entry ]]; then
+    append_index "$file" "" "$(new_id)"
+    entry=$(index_entry "$file")
+  fi
+  id=$(jq -r '.id // empty' <<<"$entry")
+  [[ -n $id ]] || id=$(basename "${file%.mp4}")
+  [[ -n $title ]] || title=$(jq -r '.title // empty' <<<"$entry")
+  [[ -n $title ]] && file=$(rename_recording "$file" "$title")
+
   local thumb="${file%.mp4}.jpg"
   [[ -f $thumb ]] || make_thumbnail "$file" "$thumb"
   set_state uploading file="$file" progress=0 title="$title"
   local url
-  if ! url=$(upload_video "$file" "$thumb" "$title"); then
+  if ! url=$(upload_video "$file" "$thumb" "$title" "$id"); then
     set_state done file="$file" url="" canUpload=true title="$title"
     notify -u critical -t 8000 "Omareel upload failed" "See $LOG_FILE"
     return 1
   fi
   printf '%s' "$url" | wl-copy 2>/dev/null || true
-  index_update "$file" "$url" "$title"
+  index_patch "$file" '.url = $url | .title = $title' --arg url "$url" --arg title "$title"
   set_state done file="$file" url="$url" progress=100 canUpload=false title="$title"
   notify -u normal -t 10000 --image "$thumb" "Omareel link copied" "${title:-$url}" --exec xdg-open "$url"
   echo "$url"
@@ -813,6 +881,41 @@ cmd_upload() {
     [[ $(current_phase) == done ]] && reset_state
   ) &
   disown
+}
+
+# cmd_rename last|<video.mp4> <title>
+cmd_rename() {
+  local target="${1:-last}" title="${2:-}"
+  [[ -n $title ]] || { echo "usage: omareel rename last|<video.mp4> \"<title>\"" >&2; return 2; }
+  local file new entry
+  file=$(resolve_recording "$target") || return 1
+  entry=$(index_entry "$file")
+  [[ -n $entry ]] || append_index "$file" "" "$(new_id)"
+  new=$(rename_recording "$file" "$title")
+  # Already shared: refresh the player page so the link shows the new title.
+  local url base id
+  url=$(jq -r '.url // empty' <<<"$entry")
+  base=$(cfg '.upload.publicBase' "")
+  base="${base%/}"
+  if [[ -n $url && -n $base && $(cfg '.upload.playerPage' true) == true ]] && command -v rclone >/dev/null; then
+    id=$(jq -r '.id // empty' <<<"$entry")
+    [[ -n $id ]] || id=$(basename "${file%.mp4}")
+    local page="$RUNTIME_DIR/$id.html"
+    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" >"$page"
+    rclone copyto "$page" "$(remote_path)/$id.html" -q 2>>"$LOG_FILE" || log "player page refresh failed for $id"
+    rm -f "$page"
+  fi
+  echo "$new"
+}
+
+# cmd_copy last|<video.mp4> — link if shared, else the local path
+cmd_copy() {
+  local file share
+  file=$(resolve_recording "${1:-last}") || return 1
+  share=$(index_entry "$file" | jq -r '.url // empty')
+  share="${share:-$file}"
+  printf '%s' "$share" | wl-copy 2>/dev/null || true
+  echo "$share"
 }
 
 # ---------------------------------------------------------------- remote ---
@@ -1107,6 +1210,8 @@ finalize)
   finalize_video "$2" "${3:-${2%.raw.mp4}.mp4}" "$(cfg .denoise true)"
   ;;
 upload) shift; cmd_upload "$@" ;;
+rename) shift; cmd_rename "$@" ;;
+copy) cmd_copy "${2:-last}" ;;
 active) gsr_running ;;
 -h | --help | help | "") usage ;;
 *)

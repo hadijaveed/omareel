@@ -32,7 +32,10 @@ Panel {
   property var doctor: ({})
   property int nowSec: Math.floor(Date.now() / 1000)
 
-  property string page: "launcher" // launcher | settings
+  property string page: "launcher" // launcher | settings | recordings
+  property var recordings: []       // index.jsonl, newest first
+  property string selectedFile: ""  // expanded row on the recordings page
+  property string draftName: ""     // rename field on the recordings page
   property bool editing: false      // a text field has focus → shortcuts off
   property string message: ""       // save/test feedback on the settings page
   property bool working: false
@@ -75,6 +78,30 @@ Panel {
       command: [root.cli, "config", "merge", JSON.stringify(Omareel.patchFor(path, value))]
     })
     proc.running = true
+  }
+
+  readonly property string outputDir: String(Omareel.get(config, "outputDir", "~/Videos/Omareel")).replace(/^~/, home)
+
+  function renameLast() {
+    var title = root.draftTitle.trim()
+    if (!title) return
+    root.draftTitle = ""
+    root.cliRun(["rename", "last", title])
+  }
+  function selectRecording(entry) {
+    var file = entry ? String(entry.file) : ""
+    root.selectedFile = root.selectedFile === file ? "" : file
+    root.draftName = entry ? String(entry.title || "") : ""
+  }
+  function renameSelected() {
+    var title = root.draftName.trim()
+    if (!title || !root.selectedFile) return
+    root.cliRun(["rename", root.selectedFile, title])
+  }
+  function uploadSelected() {
+    if (!root.selectedFile) return
+    root.cliRun(["upload", root.selectedFile, "--title=" + root.draftName.trim()])
+    root.close()
   }
 
   function uploadLast() {
@@ -139,6 +166,25 @@ Panel {
   onOpenedChanged: if (opened) { root.editing = false; refreshAll() }
 
   // ---- state / config plumbing -------------------------------------------
+
+  FileView {
+    id: indexFile
+    path: root.outputDir + "/index.jsonl"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      root.recordings = Omareel.parseJsonl(text(), 30)
+      if (root.selectedFile && !root.recordings.some(function(e) { return String(e.file) === root.selectedFile })) root.selectedFile = ""
+    }
+    onLoadFailed: root.recordings = []
+  }
+  FileView {
+    path: root.outputDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: indexFile.reload()
+  }
 
   FileView {
     id: stateFile
@@ -262,6 +308,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function settings(): void { root.page = "settings"; root.open() }
+    function recordings(): void { root.selectedFile = ""; root.page = "recordings"; root.open() }
     function status(): string { return root.phase }
     function refresh(): void { root.refreshAll() }
   }
@@ -347,14 +394,15 @@ Panel {
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(
-      (root.page === "settings" ? settingsColumn.implicitHeight : launcherColumn.implicitHeight), Style.space(720))
+      (root.page === "settings" ? settingsColumn.implicitHeight
+       : root.page === "recordings" ? libraryColumn.implicitHeight : launcherColumn.implicitHeight), Style.space(720))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editing
       onCloseRequested: {
-        if (root.page === "settings") root.page = "launcher"
+        if (root.page !== "launcher") root.page = "launcher"
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -363,7 +411,8 @@ Panel {
         anchors.fill: parent
         clip: true
         contentWidth: width
-        contentHeight: root.page === "settings" ? settingsColumn.implicitHeight : launcherColumn.implicitHeight
+        contentHeight: root.page === "settings" ? settingsColumn.implicitHeight
+          : root.page === "recordings" ? libraryColumn.implicitHeight : launcherColumn.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
 
         // ================================================================
@@ -447,15 +496,25 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
             Hint { text: Omareel.shortShare(root.state, 48); elide: Text.ElideMiddle; wrapMode: Text.NoWrap }
-            TextField {
-              id: titleField
-              visible: root.canUpload
+            Row {
               width: parent.width
-              placeholderText: "Title for the video (optional)"
-              text: root.draftTitle
-              onTextEdited: root.draftTitle = text
-              onActiveFocusChanged: root.editing = activeFocus
-              onAccepted: root.uploadLast()
+              spacing: Style.space(6)
+              TextField {
+                id: titleField
+                width: parent.width - renameBtn.width - Style.space(6)
+                placeholderText: root.canUpload ? "Title — Enter renames, Upload shares" : "Name — Enter renames the files"
+                text: root.draftTitle
+                onTextEdited: root.draftTitle = text
+                onActiveFocusChanged: root.editing = activeFocus
+                onAccepted: root.renameLast()
+              }
+              Button {
+                id: renameBtn
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰏫"
+                tooltipText: "Rename the video files"
+                onClicked: root.renameLast()
+              }
             }
             Row {
               spacing: Style.space(8)
@@ -630,12 +689,155 @@ Panel {
             Button {
               iconText: "󰉋"
               text: "Recordings"
-              onClicked: { root.close(); root.cliRun(["open"]) }
+              tooltipText: "Rename, upload or copy earlier recordings"
+              onClicked: { root.selectedFile = ""; root.page = "recordings" }
             }
             Button {
               iconText: "󰌷"
               text: "Copy last link"
               onClicked: { root.close(); root.cliRun(["last"]) }
+            }
+          }
+        }
+
+        // ================================================================
+        // Recordings page: every recording in index.jsonl, newest first.
+        // Click a row to rename it, upload it, or copy its link/path.
+        // ================================================================
+        Column {
+          id: libraryColumn
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.page === "recordings"
+
+          Item {
+            width: parent.width
+            height: libBack.implicitHeight
+            Button {
+              id: libBack
+              iconText: "󰁍"
+              text: "Back"
+              onClicked: { root.editing = false; root.page = "launcher" }
+            }
+            Text {
+              anchors.centerIn: parent
+              text: "Recordings"
+              color: Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Button {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰉋"
+              tooltipText: "Open the folder"
+              onClicked: { root.close(); root.cliRun(["open"]) }
+            }
+          }
+
+          PanelSeparator { width: parent.width }
+
+          Hint {
+            visible: root.recordings.length === 0
+            text: "Nothing recorded yet."
+          }
+
+          Repeater {
+            model: root.recordings
+            delegate: Column {
+              id: row
+              required property var modelData
+              readonly property bool selected: root.selectedFile === String(modelData.file)
+              readonly property bool shared: !!modelData.url
+              width: libraryColumn.width
+              spacing: Style.space(6)
+
+              Rectangle {
+                width: parent.width
+                height: rowText.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius / 2
+                color: row.selected ? Util.alpha(Color.accent, 0.12) : (rowHover.hovered ? Util.alpha(Color.popups.text, 0.06) : "transparent")
+                HoverHandler { id: rowHover }
+                TapHandler { onTapped: root.selectRecording(row.modelData) }
+                Column {
+                  id: rowText
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(8)
+                  Text {
+                    width: parent.width
+                    text: Omareel.recordingName(row.modelData)
+                    color: Color.popups.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideMiddle
+                  }
+                  Text {
+                    width: parent.width
+                    text: Omareel.recordingMeta(row.modelData)
+                    color: row.shared ? Color.accent : Color.popups.text
+                    opacity: row.shared ? 0.9 : 0.6
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+
+              Column {
+                visible: row.selected
+                width: parent.width
+                spacing: Style.space(6)
+                leftPadding: Style.space(8)
+                Row {
+                  width: parent.width - Style.space(8)
+                  spacing: Style.space(6)
+                  TextField {
+                    width: parent.width - saveNameBtn.width - Style.space(6)
+                    placeholderText: "Name"
+                    text: root.draftName
+                    onTextEdited: root.draftName = text
+                    onActiveFocusChanged: root.editing = activeFocus
+                    onAccepted: root.renameSelected()
+                  }
+                  Button {
+                    id: saveNameBtn
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "󰆓"
+                    text: "Rename"
+                    onClicked: root.renameSelected()
+                  }
+                }
+                Flow {
+                  width: parent.width - Style.space(8)
+                  spacing: Style.space(6)
+                  Button {
+                    visible: !row.shared && root.uploadReady
+                    iconText: "󰅧"
+                    text: "Upload"
+                    active: true
+                    onClicked: root.uploadSelected()
+                  }
+                  Button {
+                    iconText: "󰆏"
+                    text: row.shared ? "Copy link" : "Copy path"
+                    onClicked: root.cliRun(["copy", String(row.modelData.file)])
+                  }
+                  Button {
+                    iconText: "󰏌"
+                    text: "Open"
+                    onClicked: Util.execArgv(["xdg-open", row.shared ? String(row.modelData.url) : String(row.modelData.file)])
+                  }
+                  Button {
+                    visible: row.shared
+                    iconText: "󰈔"
+                    text: "Play file"
+                    onClicked: Util.execArgv(["xdg-open", String(row.modelData.file)])
+                  }
+                }
+              }
             }
           }
         }

@@ -153,6 +153,50 @@ function uploadSummary(config) {
   return "To " + providerLabel(p) + (bucket ? " · " + bucket : "")
 }
 
+// index.jsonl → array of entries, newest first, at most `max`.
+function parseJsonl(text, max) {
+  var out = []
+  var lines = String(text || "").split("\n")
+  for (var i = lines.length - 1; i >= 0 && out.length < (max || 25); i--) {
+    var line = lines[i].trim()
+    if (!line) continue
+    try { out.push(JSON.parse(line)) } catch (e) {}
+  }
+  return out
+}
+
+function baseName(path) {
+  var s = String(path || "")
+  return s.slice(s.lastIndexOf("/") + 1).replace(/\.mp4$/, "")
+}
+
+// Display name of an index entry: its title, else the file name.
+function recordingName(entry) {
+  if (!entry) return ""
+  return entry.title ? String(entry.title) : baseName(entry.file)
+}
+
+function formatDuration(sec) {
+  sec = Math.max(0, parseInt(sec || 0, 10))
+  var m = Math.floor(sec / 60), s = sec % 60
+  return m + ":" + (s < 10 ? "0" : "") + s
+}
+
+// "Today 12:56 · 0:04 · Shared" style meta line for the recordings list.
+function recordingMeta(entry) {
+  if (!entry) return ""
+  var parts = []
+  if (entry.at) {
+    var d = new Date(entry.at * 1000), now = new Date()
+    var sameDay = d.toDateString() === now.toDateString()
+    var hm = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2)
+    parts.push(sameDay ? "Today " + hm : d.toLocaleDateString(Qt.locale(), "MMM d") + " " + hm)
+  }
+  if (entry.duration) parts.push(formatDuration(entry.duration))
+  parts.push(entry.url ? "Shared" : "Local")
+  return parts.join("  ·  ")
+}
+
 // A finished recording that is still local and has somewhere to go.
 function canUpload(state) {
   return !!state && phaseOf(state) === "done" && !state.url && state.canUpload === true
