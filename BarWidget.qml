@@ -83,7 +83,26 @@ Panel {
     doctorProc.running = true
   }
 
+  function missingForSave() {
+    var need = []
+    if (root.provider === "r2" && !Omareel.get(root.config, "upload.accountId", "")) need.push("Cloudflare account ID")
+    if ((root.provider === "s3" || root.provider === "b2") && !Omareel.get(root.config, "upload.region", "")) need.push("Region")
+    if (root.provider === "s3compat" && !Omareel.get(root.config, "upload.endpoint", "")) need.push("Endpoint URL")
+    if (!Omareel.get(root.config, "upload.bucket", "")) need.push("Bucket")
+    if (!root.remoteStatus.hasSecret) {
+      if (!root.draftKey) need.push(root.provider === "b2" ? "Key ID" : "Access key ID")
+      if (!root.draftSecret) need.push(root.provider === "b2" ? "Application key" : "Secret access key")
+    }
+    return need
+  }
+
   function saveRemote() {
+    var need = missingForSave()
+    if (need.length) { root.message = "Fill in: " + need.join(", "); return }
+    if (root.provider === "b2" && root.draftKey && /^K0/.test(root.draftKey)) {
+      root.message = "That Key ID looks like the application key (starts with K00…). Backblaze's keyID is 25 characters and starts with the cluster number, e.g. 005…"
+      return
+    }
     root.message = "Saving…"
     root.working = true
     saveProc.environment = ({
@@ -94,6 +113,15 @@ Panel {
   }
 
   function testRemote() {
+    if (root.provider !== "existing" && !root.remoteStatus.hasSecret) {
+      var need = missingForSave()
+      root.message = "Save credentials first" + (need.length ? " — fill in: " + need.join(", ") : "")
+      return
+    }
+    if (!Omareel.get(root.config, "upload.publicBase", "") && root.provider !== "existing") {
+      root.message = "Enter the bucket's public URL first, so the test can fetch the probe back"
+      return
+    }
     root.message = "Testing… uploading a probe file"
     root.working = true
     testProc.running = true
@@ -703,8 +731,9 @@ Panel {
           }
           SettingField {
             visible: root.provider === "s3" || root.provider === "b2"
-            label: root.provider === "b2" ? "Region (e.g. us-west-004)" : "Region (e.g. us-east-1)"
+            label: root.provider === "b2" ? "Region — from the bucket's endpoint s3.<region>.backblazeb2.com" : "Region (e.g. us-east-1)"
             path: "upload.region"
+            placeholder: root.provider === "b2" ? "us-west-004" : "us-east-1"
           }
           SettingField {
             visible: root.provider === "s3compat"
@@ -731,7 +760,7 @@ Panel {
           SettingField {
             id: keyField
             visible: root.provider !== "none" && root.provider !== "existing"
-            label: root.provider === "b2" ? "Key ID" : "Access key ID"
+            label: root.provider === "b2" ? "Key ID (keyID, 25 chars, starts with 00…)" : "Access key ID"
             path: ""
             placeholder: root.remoteStatus.hasSecret ? "saved — leave blank to keep" : ""
             onEdited: function(v) { root.draftKey = v }
@@ -739,7 +768,7 @@ Panel {
           SettingField {
             id: secretField
             visible: root.provider !== "none" && root.provider !== "existing"
-            label: root.provider === "b2" ? "Application key" : "Secret access key"
+            label: root.provider === "b2" ? "Application key (starts with K00…)" : "Secret access key"
             secret: true
             path: ""
             placeholder: root.remoteStatus.hasSecret ? "saved — leave blank to keep" : ""
@@ -749,7 +778,7 @@ Panel {
             visible: root.provider !== "none"
             label: root.provider === "existing" ? "Public URL of that path (blank → rclone link)" : "Public URL of the bucket"
             path: "upload.publicBase"
-            placeholder: "https://pub-xxxx.r2.dev  or  https://v.yourdomain.com"
+            placeholder: root.provider === "b2" ? "https://f004.backblazeb2.com/file/<bucket>" : "https://pub-xxxx.r2.dev  or  https://v.yourdomain.com"
           }
           Toggle {
             visible: root.provider !== "none"
