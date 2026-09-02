@@ -40,7 +40,9 @@ function statusText(state, nowSec) {
   case "recording": return formatElapsed(state, nowSec) + (state.target ? "  ·  " + state.target : "")
   case "processing": return "Cleaning up audio…"
   case "uploading": return "Uploading" + (state.progress ? "  " + state.progress + "%" : "…")
-  case "done": return state.url ? "Link copied to clipboard" : "Saved  ·  path copied"
+  case "done":
+    if (state.url) return "Link copied to clipboard"
+    return state.canUpload ? "Saved  ·  upload to share" : "Saved  ·  path copied"
   default: return ""
   }
 }
@@ -149,6 +151,11 @@ function uploadSummary(config) {
   if (p === "existing") return "To " + get(config, "upload.remote", "rclone remote")
   var bucket = get(config, "upload.bucket", "")
   return "To " + providerLabel(p) + (bucket ? " · " + bucket : "")
+}
+
+// A finished recording that is still local and has somewhere to go.
+function canUpload(state) {
+  return !!state && phaseOf(state) === "done" && !state.url && state.canUpload === true
 }
 
 function uploadReady(config, remoteStatus) {

@@ -2,8 +2,8 @@
 
 Loom-style screen recording for [Omarchy](https://omarchy.org). Record an
 **area**, a **window**, or your **screen** with an optional webcam bubble and
-the microphone you choose, get the background noise removed, and end up with a
-shareable link on your clipboard a few seconds after you press Stop.
+the microphone you choose, get the background noise removed, and decide per
+video whether it stays local or goes up as a shareable link, with a title.
 
 <p align="center">
   <img src="docs/launcher.png" width="360" alt="Omareel launcher: Area / Window / Screen, microphone, system audio, camera bubble, noise removal, upload">
@@ -15,7 +15,7 @@ While recording, a small floating bar sits at the top of the screen:
 <p align="center">
   <img src="docs/recording-bar.png" width="430" alt="● 00:03 · Area 1600x900  Stop  Discard">
   <br>
-  <img src="docs/done-bar.png" width="430" alt="✓ Saved · path copied  Open  Copy">
+  <img src="docs/done-bar.png" width="520" alt="✓ Saved · upload to share  Upload  Open  Copy">
 </p>
 
 ## What it does
@@ -29,10 +29,13 @@ While recording, a small floating bar sits at the top of the screen:
   recording, then loudness normalisation to speech level.
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.
-- **Share link.** Upload to Cloudflare R2, AWS S3, Backblaze B2, any
-  S3-compatible endpoint, or any rclone remote you already have. A small
-  player page is uploaded next to the video and its URL is copied to the
-  clipboard. Without an upload destination the local path is copied instead.
+- **Share only what you choose.** After Stop the banner offers **Upload**;
+  give the video a title and the link lands on your clipboard. Everything
+  else stays in `~/Videos/Omareel`. Flip *Upload every recording* in the
+  launcher if you would rather have every take uploaded automatically.
+- **Destinations:** Cloudflare R2, AWS S3, Backblaze B2, any S3-compatible
+  endpoint, or any rclone remote you already have. A small player page
+  (titled with your title) is uploaded next to the video.
 - **Configure everything from the bar**, including the upload credentials.
   Credentials are written to rclone's own config file, never to the plugin's.
 
@@ -91,7 +94,15 @@ folder.
 
 **Launcher:** pick Area / Window / Screen. Toggle the microphone, system audio
 and camera bubble and pick devices underneath each. Toggle noise removal and
-upload. The gear opens settings.
+automatic upload. The gear opens settings.
+
+**After Stop:** the floating banner (and the launcher) show the finished
+recording with **Upload**, **Open** and **Copy**. Upload asks for a title,
+uploads the video, thumbnail and player page, and copies the link. The banner
+stays until you upload it, close it (✕), or start the next recording; ✕ keeps
+the file local. `omareel upload last --title="…"` and
+`omareel upload <file.mp4>` do the same from a terminal, so older recordings
+can be shared later too.
 
 **Keyboard:** `omareel toggle` opens the launcher when idle and stops the
 recording when one is running.
@@ -136,13 +147,13 @@ can always be redone with `omareel finalize <raw.mp4>`.
 
 ```
 omareel start [area|window|screen] [--no-mic] [--desktop-audio] [--webcam] [--no-denoise] [--no-upload]
-omareel stop | cancel | toggle | status | last | open
+omareel stop | cancel | dismiss | toggle | status | last | open
+omareel upload last|<video.mp4> [--title="…"]   # share one recording
 omareel devices                      # JSON: mics, outputs, cameras
 omareel doctor                       # JSON: deps, active denoiser, upload state
 omareel config get | merge '<json>'  # read / deep-merge omareel.json
 omareel remote save|status|test      # upload credentials → rclone.conf
 omareel finalize <raw.mp4> [out.mp4]
-omareel upload <video.mp4>
 omareel setup [--link]
 
 omarchy-shell omareel open|close|toggle|settings|status|refresh
@@ -173,7 +184,7 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "vadThreshold": 50,         // LADSPA gate, %; lower if word starts get clipped
   "keepRaw": true,
   "upload": {
-    "enabled": false,
+    "auto": false,              // true: upload every recording without asking
     "provider": "none",       // none | r2 | s3 | b2 | s3compat | existing
     "accountId": "", "region": "", "endpoint": "",
     "bucket": "", "prefix": "", "remote": "",
@@ -195,9 +206,13 @@ bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC), mpv webcam bub
 bin/omareel stop
         ├─ ffmpeg: trim pop → denoise → loudnorm → +faststart
         ├─ thumbnail, index.jsonl
-        ├─ rclone copyto  <id>.mp4 <id>.jpg <id>.html     (if enabled)
-        └─ wl-copy URL-or-path, notification
-           state.json: processing → uploading → done → idle
+        ├─ wl-copy path, notification
+        │  state.json: processing → done (banner: Upload / Open / Copy)
+        ▼
+bin/omareel upload last --title="…"       (Upload button, or upload.auto)
+        ├─ rclone copyto  <id>.mp4 <id>.jpg <id>.html
+        └─ wl-copy URL, notification
+           state.json: uploading → done → idle
 ```
 
 The shell plugin never talks to the recorder directly. `bin/omareel` writes

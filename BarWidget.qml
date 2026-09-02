@@ -52,7 +52,9 @@ Panel {
   readonly property bool denoiseOn: Omareel.get(config, "denoise", true) === true
   readonly property string provider: String(Omareel.get(config, "upload.provider", "none"))
   readonly property bool uploadReady: Omareel.uploadReady(config, remoteStatus)
-  readonly property bool uploadOn: uploadReady && Omareel.get(config, "upload.enabled", false) === true
+  readonly property bool uploadAuto: uploadReady && Omareel.get(config, "upload.auto", false) === true
+  readonly property bool canUpload: Omareel.canUpload(state)
+  property string draftTitle: ""
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -73,6 +75,13 @@ Panel {
       command: [root.cli, "config", "merge", JSON.stringify(Omareel.patchFor(path, value))]
     })
     proc.running = true
+  }
+
+  function uploadLast() {
+    if (!root.canUpload) return
+    var title = root.draftTitle.trim()
+    root.draftTitle = ""
+    root.cliRun(["upload", "last", "--title=" + title])
   }
 
   function refreshAll() {
@@ -432,13 +441,32 @@ Panel {
             text: Omareel.statusText(root.state, root.nowSec)
           }
 
+          // Last recording: local file (Upload / Open / Copy) or its link.
           Column {
             visible: root.finished
             width: parent.width
             spacing: Style.space(6)
             Hint { text: Omareel.shortShare(root.state, 48); elide: Text.ElideMiddle; wrapMode: Text.NoWrap }
+            TextField {
+              id: titleField
+              visible: root.canUpload
+              width: parent.width
+              placeholderText: "Title for the video (optional)"
+              text: root.draftTitle
+              onTextEdited: root.draftTitle = text
+              onActiveFocusChanged: root.editing = activeFocus
+              onAccepted: root.uploadLast()
+            }
             Row {
               spacing: Style.space(8)
+              Button {
+                visible: root.canUpload
+                iconText: "󰅧"
+                text: "Upload"
+                active: true
+                tooltipText: "Upload to " + Omareel.uploadSummary(root.config).replace(/^To /, "") + " and copy the link"
+                onClicked: root.uploadLast()
+              }
               Button {
                 iconText: "󰏌"
                 text: "Open"
@@ -449,19 +477,27 @@ Panel {
               }
               Button {
                 iconText: "󰆏"
-                text: "Copy link"
+                text: root.state.url ? "Copy link" : "Copy path"
                 onClicked: {
                   var share = Omareel.shareTarget(root.state)
                   if (share) Util.execDetached("printf %s " + Omareel.shellQuote(share) + " | wl-copy")
                 }
               }
+              Button {
+                visible: root.canUpload
+                iconText: "󰅖"
+                tooltipText: "Keep it local and clear this"
+                onClicked: root.cliRun(["dismiss"])
+              }
             }
           }
 
+          PanelSeparator { width: parent.width; visible: root.finished }
+
           // Start buttons
-          Heading { visible: root.idle; text: "Record" }
+          Heading { visible: root.idle || root.finished; text: "Record" }
           Row {
-            visible: root.idle
+            visible: root.idle || root.finished
             width: parent.width
             spacing: Style.space(8)
             Button {
@@ -485,9 +521,9 @@ Panel {
           }
 
           // Sources
-          Heading { visible: root.idle; text: "Sources" }
+          Heading { visible: root.idle || root.finished; text: "Sources" }
           Column {
-            visible: root.idle
+            visible: root.idle || root.finished
             width: parent.width
             spacing: Style.space(4)
 
@@ -559,9 +595,9 @@ Panel {
           }
 
           // Options
-          Heading { visible: root.idle; text: "Options" }
+          Heading { visible: root.idle || root.finished; text: "Options" }
           Column {
-            visible: root.idle
+            visible: root.idle || root.finished
             width: parent.width
             Toggle {
               width: parent.width
@@ -572,22 +608,24 @@ Panel {
             }
             Toggle {
               width: parent.width
-              label: "Upload & copy link"
-              description: root.uploadReady ? Omareel.uploadSummary(root.config)
+              label: "Upload every recording"
+              description: root.uploadReady
+                ? (root.uploadAuto ? Omareel.uploadSummary(root.config) + " · off: decide per video after Stop"
+                                   : "Off · each recording gets an Upload button after Stop")
                 : (root.provider === "none" ? "Set a destination in settings (gear)"
                                             : "Finish the destination in settings (gear)")
-              checked: root.uploadOn
+              checked: root.uploadAuto
               onClicked: {
-                if (root.uploadReady) root.setConfig("upload.enabled", !root.uploadOn)
+                if (root.uploadReady) root.setConfig("upload.auto", !root.uploadAuto)
                 else { root.message = ""; root.page = "settings" }
               }
             }
           }
 
-          PanelSeparator { width: parent.width; visible: root.idle }
+          PanelSeparator { width: parent.width; visible: root.idle || root.finished }
 
           Row {
-            visible: root.idle
+            visible: root.idle || root.finished
             spacing: Style.space(8)
             Button {
               iconText: "󰉋"
