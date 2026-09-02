@@ -130,6 +130,19 @@ function deviceLabel(list, value) {
   return String(value || "")
 }
 
+// Who holds the selected camera open ("" when free). "auto" = first real camera.
+function cameraBusy(list, value) {
+  if (!Array.isArray(list)) return ""
+  var v = String(value || "auto")
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    if (String(item.value) === "auto") continue
+    if (v === "auto" && item.loopback) continue // bin/omareel skips loopbacks for auto too
+    if (v === "auto" || String(item.value) === v) return item.busy ? String(item.busy) : ""
+  }
+  return ""
+}
+
 var PROVIDERS = [
   { value: "none", label: "Off — keep recordings local" },
   { value: "r2", label: "Cloudflare R2" },

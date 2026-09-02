@@ -266,6 +266,11 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
   hide them (the bar button timer and the keybinding still stop the
   recording). Area recordings move them to the bottom edge when the region
   covers the top-centre spot.
+- **A camera can only stream to one program at a time.** If Chromium,
+  Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
+  was granted the camera), the bubble cannot start. Omareel says so in the
+  launcher ("In use by Chromium") and in a notification, and records without
+  the bubble. End the call or close that tab, then record again.
 - Window recordings with the camera on are re-encoded once to composite the
   bubble, so they take a few extra seconds to finish. The camera take is kept
   as `<id>.cam.mp4` next to the raw file while *Keep raw* is on.

@@ -622,7 +622,9 @@ Panel {
               width: parent.width
               label: "Camera bubble"
               description: root.webcamOn
-                ? Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium")
+                ? (Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
+                   ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — end that call or tab, or the bubble is skipped"
+                   : Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium"))
                 : "Off — puts you in the corner of the video"
               checked: root.webcamOn
               onClicked: root.setConfig("webcam", !root.webcamOn)

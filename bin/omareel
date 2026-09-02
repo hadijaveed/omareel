@@ -35,6 +35,7 @@ STATE_FILE="$RUNTIME_DIR/state.json"
 LOG_FILE="$RUNTIME_DIR/omareel.log"
 PID_FILE="$RUNTIME_DIR/gsr.pid"
 CAM_PID_FILE="$RUNTIME_DIR/cam.pid"
+OVERLAY_PID_FILE="$RUNTIME_DIR/overlay.pid"
 MODEL_DIR="$HOME/.local/share/omareel/models"
 RCLONE_CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
 RCLONE_REMOTE="omareel"
@@ -179,8 +180,21 @@ cmd_devices() {
                   | map(.label |= sub("^Monitor of "; "")))),
       cameras: ([{value: "auto", label: "First available camera"}]
              + ($cams | rows | map(capture("^(?<value>/dev/video[0-9]+)\\s+(?<label>.*)$")
+                                 | .loopback = (.label | test("loopback"; "i"))
                                  | .label |= (sub("\\s*\\(.*$"; "") | sub(":\\s*$"; "")))))
-    }'
+    }' | camera_busy_annotate
+}
+
+# Add "busy": "<holder>" to each camera entry that another process has open.
+camera_busy_annotate() {
+  local json holder dev
+  json=$(cat)
+  for dev in $(jq -r '.cameras[].value | select(startswith("/dev/"))' <<<"$json"); do
+    if holder=$(camera_holder "$dev"); then
+      json=$(jq --arg d "$dev" --arg h "$holder" '(.cameras[] | select(.value == $d)).busy = $h' <<<"$json")
+    fi
+  done
+  echo "$json"
 }
 
 audio_arg() {
@@ -202,6 +216,44 @@ audio_arg() {
 # start_webcam_overlay <device|auto> <size> <region-or-empty>
 # Same mpv overlay Omarchy's recorder uses, so the WebcamOverlay window rules
 # and omarchy-capture-webcam-resize apply unchanged.
+# camera_holder <device> -> "Chromium (pid 1234)" when another process has the
+# camera open, else empty. A UVC camera streams to one process at a time, so a
+# browser call (Slack, Meet, Teams) makes every other open fail with a
+# misleading "Failed to recognize file format".
+camera_holder() {
+  local device="$1" pid comm
+  for pid in $(fuser "$device" 2>/dev/null); do
+    [[ $pid == $$ ]] && continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+    [[ -n $comm ]] || continue
+    case "$comm" in
+    chrom*) comm="Chromium" ;;
+    firefox*) comm="Firefox" ;;
+    esac
+    echo "$comm"
+    return 0
+  done
+  return 1
+}
+
+# kill_tracked <pidfile> <program> — kill the recorded pid only while it still
+# runs that program; a reused pid must never take an unrelated process down.
+kill_tracked() {
+  local pidfile="$1" program="$2" pid
+  [[ -f $pidfile ]] || return 0
+  pid=$(cat "$pidfile")
+  if [[ -n $pid ]] && [[ $(ps -o comm= -p "$pid" 2>/dev/null) == "$program" ]]; then
+    kill -INT "$pid" 2>/dev/null || true
+    local count=0
+    while kill -0 "$pid" 2>/dev/null && ((count < 50)); do
+      sleep 0.1
+      ((count++))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pidfile"
+}
+
 # webcam_device [configured] -> /dev/videoN. "auto" skips v4l2loopback devices,
 # which list first but only carry frames while something feeds them.
 webcam_device() {
@@ -218,9 +270,23 @@ webcam_device() {
 # afterwards. Used for Window recordings, where the on-screen bubble cannot
 # be captured, and for webcamMode=composite. Timestamps are wall-clock and
 # kept (-copyts), so finalize can line the two streams up exactly.
+# webcam_failed <device> <what> — log it and tell the user why, naming the
+# program that holds the camera when there is one.
+webcam_failed() {
+  local device="$1" what="$2" holder
+  if holder=$(camera_holder "$device"); then
+    log "webcam $device: $what; held by $holder"
+    notify -u critical -t 8000 "Omareel: camera bubble skipped" "The camera is in use by $holder (a call or a tab). End it, then record again."
+  else
+    log "webcam $device: $what (see output above)"
+    notify -u critical -t 8000 "Omareel: camera bubble did not start" "See $LOG_FILE"
+  fi
+}
+
 # start_webcam_capture <device> <out.cam.mp4>
 start_webcam_capture() {
   local device="$1" out="$2" formats size="640x360" input=()
+  cleanup_webcam # an orphaned capture from a crashed run would hold the camera
   formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
   if grep -q MJPG <<<"$formats"; then
     input=(-input_format mjpeg)
@@ -235,25 +301,26 @@ start_webcam_capture() {
 
 # Camera warm-up is ~1 s; wait (bounded) until frames are flowing so the
 # bubble is there from the first frame of the recording.
+# wait_webcam_capture <device> <out.cam.mp4>
 wait_webcam_capture() {
-  local out="$1" waited=0
+  local device="$1" out="$2" waited=0
   while ((waited < 25)) && [[ $(stat -c %s "$out" 2>/dev/null || echo 0) -lt 4096 ]]; do
+    if ! webcam_capture_alive; then
+      webcam_failed "$device" "capture exited early"
+      rm -f "$CAM_PID_FILE" "$out"
+      return 1
+    fi
     sleep 0.1
     ((waited++))
   done
 }
 
-stop_webcam_capture() {
-  [[ -f $CAM_PID_FILE ]] || return 0
-  local pid count=0
-  pid=$(cat "$CAM_PID_FILE")
-  kill -INT "$pid" 2>/dev/null
-  while kill -0 "$pid" 2>/dev/null && ((count < 50)); do
-    sleep 0.1
-    ((count++))
-  done
-  kill -9 "$pid" 2>/dev/null || true
-  rm -f "$CAM_PID_FILE"
+stop_webcam_capture() { kill_tracked "$CAM_PID_FILE" ffmpeg; }
+
+webcam_capture_alive() {
+  local pid
+  pid=$(cat "$CAM_PID_FILE" 2>/dev/null) || return 1
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
 }
 
 start_webcam_overlay() {
@@ -280,13 +347,21 @@ start_webcam_overlay() {
     '--vf=lavfi=[crop=ih*8/9:ih]' \
     --title="WebcamOverlay" --wayland-app-id="WebcamOverlay-$size" \
     --no-border --no-audio --no-osc --osd-level=0 \
-    --really-quiet &>/dev/null &
+    --msg-level=all=warn >>"$LOG_FILE" 2>&1 &
+  echo $! >"$OVERLAY_PID_FILE"
 
-  local waited=0
-  while ((waited < 80)) && ! hyprctl clients -j | jq -e 'any(.[]; .title == "WebcamOverlay")' >/dev/null 2>&1; do
+  local waited=0 mpv_pid
+  mpv_pid=$(cat "$OVERLAY_PID_FILE")
+  while ((waited < 80)) && kill -0 "$mpv_pid" 2>/dev/null && ! hyprctl clients -j | jq -e --arg c "WebcamOverlay-$size" \
+    'any(.[]; .title == "WebcamOverlay" and .class == $c)' >/dev/null 2>&1; do
     sleep 0.05
     ((waited++))
   done
+  if ((waited >= 80)) || ! kill -0 "$mpv_pid" 2>/dev/null; then
+    rm -f "$OVERLAY_PID_FILE"
+    webcam_failed "$device" "overlay window did not appear"
+    return 1
+  fi
 
   [[ -n $region ]] && echo "$region" >"$WEBCAM_REGION_FILE"
   omarchy-capture-webcam-resize "$size" 2>/dev/null || true
@@ -295,7 +370,10 @@ start_webcam_overlay() {
 
 cleanup_webcam() {
   stop_webcam_capture
-  pkill -f "WebcamOverlay" 2>/dev/null
+  kill_tracked "$OVERLAY_PID_FILE" mpv
+  # Anchored to mpv's own command line: a bare -f "WebcamOverlay" also kills
+  # any shell or editor whose arguments merely mention the word.
+  pkill -f -- '^mpv av://v4l2:.*--title=WebcamOverlay' 2>/dev/null
   rm -f "$WEBCAM_REGION_FILE"
 }
 
@@ -482,7 +560,7 @@ cmd_start() {
     if [[ $target == portal || $(cfg .webcamMode auto) == composite ]]; then
       if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
         start_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4"
-        [[ $target == portal ]] || wait_webcam_capture "${raw%.raw.mp4}.cam.mp4"
+        [[ $target == portal ]] || wait_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4" || true
       else
         notify -u critical -t 3000 "Omareel: no webcam found"
       fi
@@ -527,7 +605,14 @@ cmd_start() {
 
   # Wall-clock moment the recorder started writing: finalize lines the camera
   # take up against it.
-  [[ -f $CAM_PID_FILE ]] && date +%s.%N >"${raw%.raw.mp4}.cam.start"
+  if [[ -f $CAM_PID_FILE ]]; then
+    if webcam_capture_alive; then
+      date +%s.%N >"${raw%.raw.mp4}.cam.start"
+    else
+      webcam_failed "${cam_device:-camera}" "capture exited before the recording started"
+      rm -f "$CAM_PID_FILE" "${raw%.raw.mp4}.cam.mp4"
+    fi
+  fi
 
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload"
