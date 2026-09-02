@@ -1,0 +1,812 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+import "Omareel.js" as Omareel
+
+// Bar launcher for Omareel: a record glyph (with a live timer while recording)
+// that opens a Loom-style start panel — pick Area / Window / Screen, choose
+// microphone, system-audio source and webcam, flip noise removal and upload,
+// and a settings page (gear) for recording quality and the upload destination
+// (Cloudflare R2, AWS S3, Backblaze B2, any S3 endpoint, or an existing
+// rclone remote). Credentials go straight to rclone.conf via bin/omareel and
+// are never stored in omareel.json.
+//
+// IPC:  omarchy-shell omareel open|close|toggle|status|refresh|settings
+Panel {
+  id: root
+
+  moduleName: "hadijaveed.omareel"
+  ipcTarget: "omareel"
+  manageIpc: false
+
+  readonly property string cli: String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, "")
+  readonly property string home: Quickshell.env("HOME")
+  readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omareel"
+
+  property var state: ({ phase: "idle" })
+  property var config: ({})
+  property var devices: ({ mics: [], outputs: [], cameras: [] })
+  property var remoteStatus: ({})
+  property var doctor: ({})
+  property int nowSec: Math.floor(Date.now() / 1000)
+
+  property string page: "launcher" // launcher | settings
+  property bool editing: false      // a text field has focus → shortcuts off
+  property string message: ""       // save/test feedback on the settings page
+  property bool working: false
+  property string draftKey: ""
+  property string draftSecret: ""
+
+  readonly property string phase: Omareel.phaseOf(state)
+  readonly property bool recording: phase === "recording"
+  readonly property bool busy: phase === "picking" || phase === "processing" || phase === "uploading"
+  readonly property bool finished: phase === "done"
+  readonly property bool idle: phase === "idle"
+  readonly property string elapsed: Omareel.formatElapsed(state, nowSec)
+
+  readonly property bool micOn: Omareel.get(config, "mic", true) === true
+  readonly property bool desktopOn: Omareel.get(config, "desktopAudio", false) === true
+  readonly property bool webcamOn: Omareel.get(config, "webcam", false) === true
+  readonly property bool denoiseOn: Omareel.get(config, "denoise", true) === true
+  readonly property string provider: String(Omareel.get(config, "upload.provider", "none"))
+  readonly property bool uploadReady: Omareel.uploadReady(config, remoteStatus)
+  readonly property bool uploadOn: uploadReady && Omareel.get(config, "upload.enabled", false) === true
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  // ---- actions ------------------------------------------------------------
+
+  function cliRun(args) { Util.execArgv([root.cli].concat(args)) }
+
+  function start(kind) {
+    root.close()
+    cliRun(["start", kind])
+  }
+
+  // Optimistic local update + persisted deep-merge through the CLI.
+  function setConfig(path, value) {
+    root.config = Omareel.withValue(root.config, path, value)
+    var proc = mergeComponent.createObject(root, {
+      command: [root.cli, "config", "merge", JSON.stringify(Omareel.patchFor(path, value))]
+    })
+    proc.running = true
+  }
+
+  function refreshAll() {
+    stateFile.reload()
+    configFile.reload()
+    devicesProc.running = true
+    remoteProc.running = true
+    doctorProc.running = true
+  }
+
+  function saveRemote() {
+    root.message = "Saving…"
+    root.working = true
+    saveProc.environment = ({
+      OMAREEL_ACCESS_KEY_ID: root.draftKey,
+      OMAREEL_SECRET_ACCESS_KEY: root.draftSecret
+    })
+    saveProc.running = true
+  }
+
+  function testRemote() {
+    root.message = "Testing… uploading a probe file"
+    root.working = true
+    testProc.running = true
+  }
+
+  onOpenedChanged: if (opened) { root.editing = false; refreshAll() }
+
+  // ---- state / config plumbing -------------------------------------------
+
+  FileView {
+    id: stateFile
+    path: root.runtimeDir + "/state.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.state = Omareel.parseJson(text(), { phase: "idle" })
+    onLoadFailed: root.state = { phase: "idle" }
+  }
+
+  // state.json is replaced atomically (write tmp + mv), which some watchers
+  // report on the directory rather than the file. Watch both.
+  FileView {
+    path: root.runtimeDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: stateFile.reload()
+  }
+
+  FileView {
+    id: configFile
+    path: root.home + "/.config/omarchy/omareel.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.config = Omareel.parseJson(text(), {})
+    onLoadFailed: root.config = {}
+  }
+
+  // `omareel status` creates the runtime dir, the default config and an idle
+  // state file, so the watchers above have something to attach to.
+  Process {
+    command: [root.cli, "status"]
+    running: true
+    onExited: function() {
+      stateFile.reload()
+      configFile.reload()
+    }
+  }
+
+  Component {
+    id: mergeComponent
+    Process {
+      onExited: function() { configFile.reload(); destroy() }
+    }
+  }
+
+  Process {
+    id: devicesProc
+    command: [root.cli, "devices"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.devices = Omareel.parseJson(text, { mics: [], outputs: [], cameras: [] })
+    }
+  }
+
+  Process {
+    id: remoteProc
+    command: [root.cli, "remote", "status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.remoteStatus = Omareel.parseJson(text, {})
+    }
+  }
+
+  Process {
+    id: doctorProc
+    command: [root.cli, "doctor"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.doctor = Omareel.parseJson(text, {})
+    }
+  }
+
+  Process {
+    id: saveProc
+    command: [root.cli, "remote", "save"]
+    stdout: StdioCollector { id: saveOut; waitForEnd: true }
+    stderr: StdioCollector { id: saveErr; waitForEnd: true }
+    onExited: function(code) {
+      root.working = false
+      var out = String(saveOut.text || "").trim(), err = String(saveErr.text || "").trim()
+      root.message = code === 0 ? (out || "Saved") : ("Save failed: " + (err || out || "exit " + code))
+      if (code === 0) { root.draftKey = ""; root.draftSecret = ""; keyField.text = ""; secretField.text = "" }
+      remoteProc.running = true
+    }
+  }
+
+  Process {
+    id: testProc
+    command: [root.cli, "remote", "test"]
+    stdout: StdioCollector { id: testOut; waitForEnd: true }
+    stderr: StdioCollector { id: testErr; waitForEnd: true }
+    onExited: function(code) {
+      root.working = false
+      var out = String(testOut.text || "").trim(), err = String(testErr.text || "").trim()
+      root.message = (code === 0 ? "" : "Test failed\n") + (out || err || "exit " + code)
+    }
+  }
+
+  Process {
+    id: linkProc
+    command: [root.cli, "setup", "--link"]
+    onExited: function() { root.message = "Linked ~/.local/bin/omareel"; doctorProc.running = true }
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.recording || root.busy
+    triggeredOnStart: true
+    onTriggered: root.nowSec = Math.floor(Date.now() / 1000)
+  }
+
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.page = "launcher"; root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function settings(): void { root.page = "settings"; root.open() }
+    function status(): string { return root.phase }
+    function refresh(): void { root.refreshAll() }
+  }
+
+  // ---- bar button ---------------------------------------------------------
+
+  WidgetButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.recording ? "󰑊 " + root.elapsed : (root.busy ? "󰑊 …" : "󰑊")
+    active: root.recording
+    tooltipText: root.recording ? "Stop Omareel recording" : "Omareel: record & share"
+    onPressed: function(b) {
+      if (b === Qt.LeftButton) {
+        if (root.recording) root.cliRun(["stop"])
+        else { root.page = "launcher"; root.toggle() }
+      } else if (b === Qt.RightButton) {
+        if (root.recording) root.cliRun(["cancel"])
+        else root.cliRun(["last"])
+      } else if (b === Qt.MiddleButton) {
+        root.cliRun(["open"])
+      }
+    }
+  }
+
+  // ---- reusable bits ------------------------------------------------------
+
+  component SettingField: Column {
+    id: field
+    property string label: ""
+    property string placeholder: ""
+    property string path: ""
+    property bool secret: false
+    property alias text: input.text
+    property alias input: input
+    signal edited(string value)
+    width: parent.width
+    spacing: Style.space(3)
+    Text {
+      text: field.label
+      color: Color.popups.text
+      opacity: 0.7
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+    }
+    TextField {
+      id: input
+      width: parent.width
+      password: field.secret
+      placeholderText: field.placeholder
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+      foreground: Color.popups.text
+      text: field.path ? String(Omareel.get(root.config, field.path, "")) : ""
+      onActiveFocusChanged: root.editing = activeFocus
+      onTextEdited: field.edited(text)
+      onEditingFinished: if (field.path) root.setConfig(field.path, text.trim())
+    }
+  }
+
+  component Heading: PanelSectionHeader {
+    width: parent.width
+  }
+
+  component Hint: Text {
+    width: parent.width
+    color: Color.popups.text
+    opacity: 0.65
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    wrapMode: Text.Wrap
+  }
+
+  // ---- popup --------------------------------------------------------------
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentHeight: panel.fittedContentHeight(
+      (root.page === "settings" ? settingsColumn.implicitHeight : launcherColumn.implicitHeight), Style.space(720))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      blocked: root.editing
+      onCloseRequested: {
+        if (root.page === "settings") root.page = "launcher"
+        else root.close()
+      }
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+
+      Flickable {
+        anchors.fill: parent
+        clip: true
+        contentWidth: width
+        contentHeight: root.page === "settings" ? settingsColumn.implicitHeight : launcherColumn.implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
+
+        // ================================================================
+        // Launcher page
+        // ================================================================
+        Column {
+          id: launcherColumn
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.page === "launcher"
+
+          Item {
+            width: parent.width
+            height: Math.max(headerRow.implicitHeight, gear.implicitHeight)
+            Row {
+              id: headerRow
+              spacing: Style.space(8)
+              Text {
+                text: "󰑊"
+                color: root.recording ? Color.urgent : Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.iconLarge
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Column {
+                anchors.verticalCenter: parent.verticalCenter
+                Text {
+                  text: "Omareel"
+                  color: Color.popups.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+                Text {
+                  text: root.idle ? "Record a video and share a link" : Omareel.statusText(root.state, root.nowSec)
+                  color: Color.popups.text
+                  opacity: 0.65
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+            Button {
+              id: gear
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰒓"
+              tooltipText: "Settings"
+              onClicked: { root.message = ""; root.page = "settings" }
+            }
+          }
+
+          PanelSeparator { width: parent.width }
+
+          // Recording controls
+          Row {
+            visible: root.recording
+            spacing: Style.space(8)
+            Button {
+              iconText: "󰓛"
+              text: "Stop & share"
+              active: true
+              onClicked: { root.close(); root.cliRun(["stop"]) }
+            }
+            Button {
+              iconText: "󰆴"
+              text: "Discard"
+              onClicked: { root.close(); root.cliRun(["cancel"]) }
+            }
+          }
+
+          Hint {
+            visible: root.busy && !root.recording
+            opacity: 1
+            text: Omareel.statusText(root.state, root.nowSec)
+          }
+
+          Column {
+            visible: root.finished
+            width: parent.width
+            spacing: Style.space(6)
+            Hint { text: Omareel.shortShare(root.state, 48); elide: Text.ElideMiddle; wrapMode: Text.NoWrap }
+            Row {
+              spacing: Style.space(8)
+              Button {
+                iconText: "󰏌"
+                text: "Open"
+                onClicked: {
+                  var share = Omareel.shareTarget(root.state)
+                  if (share) Util.execArgv(["xdg-open", share])
+                }
+              }
+              Button {
+                iconText: "󰆏"
+                text: "Copy link"
+                onClicked: {
+                  var share = Omareel.shareTarget(root.state)
+                  if (share) Util.execDetached("printf %s " + Omareel.shellQuote(share) + " | wl-copy")
+                }
+              }
+            }
+          }
+
+          // Start buttons
+          Heading { visible: root.idle; text: "Record" }
+          Row {
+            visible: root.idle
+            width: parent.width
+            spacing: Style.space(8)
+            Button {
+              iconText: "󰆞"
+              text: "Area"
+              tooltipText: "Drag a region, or click a window to snap to it"
+              onClicked: root.start("area")
+            }
+            Button {
+              iconText: "󰒓"
+              text: "Window"
+              tooltipText: "Pick an app; it stays captured even when covered (no webcam bubble)"
+              onClicked: root.start("window")
+            }
+            Button {
+              iconText: "󰍹"
+              text: "Screen"
+              tooltipText: "The whole focused monitor"
+              onClicked: root.start("screen")
+            }
+          }
+
+          // Sources
+          Heading { visible: root.idle; text: "Sources" }
+          Column {
+            visible: root.idle
+            width: parent.width
+            spacing: Style.space(4)
+
+            Toggle {
+              width: parent.width
+              label: "Microphone"
+              description: root.micOn ? Omareel.deviceLabel(root.devices.mics, Omareel.get(root.config, "micDevice", "default")) : "Off"
+              checked: root.micOn
+              onClicked: root.setConfig("mic", !root.micOn)
+            }
+            Dropdown {
+              visible: root.micOn
+              width: parent.width
+              showLabel: false
+              options: root.devices.mics
+              value: String(Omareel.get(root.config, "micDevice", "default"))
+              onChanged: function(v) { root.setConfig("micDevice", v) }
+            }
+
+            Toggle {
+              width: parent.width
+              label: "System audio"
+              description: root.desktopOn ? Omareel.deviceLabel(root.devices.outputs, Omareel.get(root.config, "desktopDevice", "default")) : "Off"
+              checked: root.desktopOn
+              onClicked: root.setConfig("desktopAudio", !root.desktopOn)
+            }
+            Dropdown {
+              visible: root.desktopOn
+              width: parent.width
+              showLabel: false
+              options: root.devices.outputs
+              value: String(Omareel.get(root.config, "desktopDevice", "default"))
+              onChanged: function(v) { root.setConfig("desktopDevice", v) }
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Camera bubble"
+              description: root.webcamOn
+                ? Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium")
+                : "Off — Area and Screen recordings only"
+              checked: root.webcamOn
+              onClicked: root.setConfig("webcam", !root.webcamOn)
+            }
+            Row {
+              visible: root.webcamOn
+              width: parent.width
+              spacing: Style.space(6)
+              Dropdown {
+                width: parent.width - sizeDrop.width - Style.space(6)
+                showLabel: false
+                options: root.devices.cameras
+                value: String(Omareel.get(root.config, "webcamDevice", "auto"))
+                onChanged: function(v) { root.setConfig("webcamDevice", v) }
+              }
+              Dropdown {
+                id: sizeDrop
+                width: Style.space(110)
+                showLabel: false
+                options: [
+                  { value: "small", label: "Small" },
+                  { value: "medium", label: "Medium" },
+                  { value: "large", label: "Large" }
+                ]
+                value: String(Omareel.get(root.config, "webcamSize", "medium"))
+                onChanged: function(v) { root.setConfig("webcamSize", v) }
+              }
+            }
+          }
+
+          // Options
+          Heading { visible: root.idle; text: "Options" }
+          Column {
+            visible: root.idle
+            width: parent.width
+            Toggle {
+              width: parent.width
+              label: "Noise removal"
+              description: "RNNoise clean-up of the microphone after recording"
+              checked: root.denoiseOn
+              onClicked: root.setConfig("denoise", !root.denoiseOn)
+            }
+            Toggle {
+              width: parent.width
+              label: "Upload & copy link"
+              description: root.uploadReady ? Omareel.uploadSummary(root.config)
+                : (root.provider === "none" ? "Set a destination in settings (gear)"
+                                            : "Finish the destination in settings (gear)")
+              checked: root.uploadOn
+              onClicked: {
+                if (root.uploadReady) root.setConfig("upload.enabled", !root.uploadOn)
+                else { root.message = ""; root.page = "settings" }
+              }
+            }
+          }
+
+          PanelSeparator { width: parent.width; visible: root.idle }
+
+          Row {
+            visible: root.idle
+            spacing: Style.space(8)
+            Button {
+              iconText: "󰉋"
+              text: "Recordings"
+              onClicked: { root.close(); root.cliRun(["open"]) }
+            }
+            Button {
+              iconText: "󰌷"
+              text: "Copy last link"
+              onClicked: { root.close(); root.cliRun(["last"]) }
+            }
+          }
+        }
+
+        // ================================================================
+        // Settings page
+        // ================================================================
+        Column {
+          id: settingsColumn
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.page === "settings"
+
+          Item {
+            width: parent.width
+            height: backBtn.implicitHeight
+            Button {
+              id: backBtn
+              iconText: "󰁍"
+              text: "Back"
+              onClicked: { root.editing = false; root.page = "launcher" }
+            }
+            Text {
+              anchors.centerIn: parent
+              text: "Settings"
+              color: Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Text {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "v" + String(root.doctor.version || "")
+              color: Color.popups.text
+              opacity: 0.5
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          PanelSeparator { width: parent.width }
+
+          // -- Recording --
+          Heading { text: "Recording" }
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+            Dropdown {
+              width: (parent.width - Style.space(12)) / 3
+              label: "Frame rate"
+              options: [ { value: "30", label: "30 fps" }, { value: "60", label: "60 fps" } ]
+              value: String(Omareel.get(root.config, "fps", 30))
+              onChanged: function(v) { root.setConfig("fps", parseInt(v)) }
+            }
+            Dropdown {
+              width: (parent.width - Style.space(12)) / 3
+              label: "Quality"
+              options: [
+                { value: "medium", label: "Medium" },
+                { value: "high", label: "High" },
+                { value: "very_high", label: "Very high" },
+                { value: "ultra", label: "Ultra" }
+              ]
+              value: String(Omareel.get(root.config, "quality", "very_high"))
+              onChanged: function(v) { root.setConfig("quality", v) }
+            }
+            Dropdown {
+              width: (parent.width - Style.space(12)) / 3
+              label: "Codec"
+              options: [
+                { value: "h264", label: "H.264 (plays everywhere)" },
+                { value: "hevc", label: "HEVC (smaller)" },
+                { value: "av1", label: "AV1 (smallest)" }
+              ]
+              value: String(Omareel.get(root.config, "codec", "h264"))
+              onChanged: function(v) { root.setConfig("codec", v) }
+            }
+          }
+          Toggle {
+            width: parent.width
+            label: "Keep the raw take"
+            description: "Save <id>.raw.mp4 next to the cleaned-up file"
+            checked: Omareel.get(root.config, "keepRaw", true) === true
+            onClicked: root.setConfig("keepRaw", !(Omareel.get(root.config, "keepRaw", true) === true))
+          }
+          SettingField {
+            label: "Recordings folder"
+            path: "outputDir"
+            placeholder: "~/Videos/Omareel"
+          }
+
+          // -- Noise removal --
+          Heading { text: "Noise removal" }
+          Dropdown {
+            width: parent.width
+            label: "Engine"
+            options: [
+              { value: "auto", label: "Auto (best available)" },
+              { value: "ladspa", label: "RNNoise LADSPA plugin" },
+              { value: "arnndn", label: "ffmpeg arnndn (RNNoise)" },
+              { value: "afftdn", label: "ffmpeg afftdn (basic FFT)" },
+              { value: "off", label: "Off" }
+            ]
+            value: String(Omareel.get(root.config, "denoiseEngine", "auto"))
+            onChanged: function(v) { root.setConfig("denoiseEngine", v) }
+          }
+          Hint {
+            text: "Active: " + String(root.doctor.engine || "…")
+              + (root.doctor.ladspa === false ? "\nFor the most reliable clean-up:  sudo pacman -S noise-suppression-for-voice" : "")
+          }
+
+          // -- Sharing --
+          Heading { text: "Sharing" }
+          Dropdown {
+            width: parent.width
+            label: "Destination"
+            options: Omareel.PROVIDERS
+            value: root.provider
+            onChanged: function(v) { root.message = ""; root.setConfig("upload.provider", v) }
+          }
+          Hint {
+            visible: root.provider !== "none" && root.remoteStatus.rcloneInstalled === false
+            text: "rclone is not installed:  sudo pacman -S rclone"
+          }
+          SettingField {
+            visible: root.provider === "r2"
+            label: "Cloudflare account ID"
+            path: "upload.accountId"
+            placeholder: "32 hex characters from the R2 overview page"
+          }
+          SettingField {
+            visible: root.provider === "s3" || root.provider === "b2"
+            label: root.provider === "b2" ? "Region (e.g. us-west-004)" : "Region (e.g. us-east-1)"
+            path: "upload.region"
+          }
+          SettingField {
+            visible: root.provider === "s3compat"
+            label: "Endpoint URL"
+            path: "upload.endpoint"
+            placeholder: "https://s3.example.com"
+          }
+          SettingField {
+            visible: root.provider === "existing"
+            label: "rclone remote and path"
+            path: "upload.remote"
+            placeholder: "gdrive:Omareel  or  myremote:bucket/videos"
+          }
+          SettingField {
+            visible: root.provider !== "none" && root.provider !== "existing"
+            label: "Bucket"
+            path: "upload.bucket"
+          }
+          SettingField {
+            visible: root.provider !== "none" && root.provider !== "existing"
+            label: "Folder inside the bucket (optional)"
+            path: "upload.prefix"
+          }
+          SettingField {
+            id: keyField
+            visible: root.provider !== "none" && root.provider !== "existing"
+            label: root.provider === "b2" ? "Key ID" : "Access key ID"
+            path: ""
+            placeholder: root.remoteStatus.hasSecret ? "saved — leave blank to keep" : ""
+            onEdited: function(v) { root.draftKey = v }
+          }
+          SettingField {
+            id: secretField
+            visible: root.provider !== "none" && root.provider !== "existing"
+            label: root.provider === "b2" ? "Application key" : "Secret access key"
+            secret: true
+            path: ""
+            placeholder: root.remoteStatus.hasSecret ? "saved — leave blank to keep" : ""
+            onEdited: function(v) { root.draftSecret = v }
+          }
+          SettingField {
+            visible: root.provider !== "none"
+            label: root.provider === "existing" ? "Public URL of that path (blank → rclone link)" : "Public URL of the bucket"
+            path: "upload.publicBase"
+            placeholder: "https://pub-xxxx.r2.dev  or  https://v.yourdomain.com"
+          }
+          Toggle {
+            visible: root.provider !== "none"
+            width: parent.width
+            label: "Upload a player page"
+            description: "Share <id>.html with a poster and download link instead of the bare .mp4"
+            checked: Omareel.get(root.config, "upload.playerPage", true) === true
+            onClicked: root.setConfig("upload.playerPage", !(Omareel.get(root.config, "upload.playerPage", true) === true))
+          }
+          Row {
+            visible: root.provider !== "none"
+            spacing: Style.space(8)
+            Button {
+              iconText: "󰆓"
+              text: "Save credentials"
+              visible: root.provider !== "existing"
+              active: root.draftKey !== "" && root.draftSecret !== ""
+              onClicked: root.saveRemote()
+            }
+            Button {
+              iconText: "󰐊"
+              text: root.working ? "Working…" : "Test upload"
+              onClicked: if (!root.working) root.testRemote()
+            }
+          }
+          Hint {
+            visible: root.message !== ""
+            opacity: 0.9
+            text: root.message
+          }
+          Hint {
+            visible: root.provider !== "none"
+            text: "Credentials are written to ~/.config/rclone/rclone.conf (mode 600) and never to omareel.json."
+          }
+
+          // -- Setup --
+          Heading { text: "Setup" }
+          Hint {
+            text: (root.doctor.linked === true ? "CLI on PATH: ~/.local/bin/omareel"
+                                                : "Put the CLI on your PATH so keybindings can call it:")
+          }
+          Button {
+            visible: root.doctor.linked !== true
+            iconText: "󰌷"
+            text: "Link omareel into ~/.local/bin"
+            onClicked: linkProc.running = true
+          }
+          Hint {
+            text: "Suggested keybinding (~/.config/hypr/bindings.lua):\n"
+              + "o.bind(\"SUPER + SHIFT + R\", \"Omareel\", \"omareel toggle\")"
+          }
+          Hint {
+            visible: Array.isArray(root.doctor.missing) && root.doctor.missing.length > 0
+            text: "Missing tools: " + (root.doctor.missing || []).join(", ")
+          }
+        }
+      }
+    }
+  }
+}

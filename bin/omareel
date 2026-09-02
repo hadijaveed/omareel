@@ -1,0 +1,1034 @@
+#!/usr/bin/env bash
+#
+# omareel — Loom-style screen recording for Omarchy.
+#
+#   record area / window / screen with gpu-screen-recorder (GPU encode),
+#   optional webcam bubble, chosen microphone + system-audio source
+#   -> post-process: trim, RNNoise denoise, loudness normalise, faststart
+#   -> optional upload (rclone: R2 / S3 / B2 / S3-compatible / any remote)
+#   -> share link (or file path) copied to the clipboard
+#
+# The shell plugin only reads $STATE_FILE; every phase change is written there
+# so the floating controls and the bar launcher stay in sync.
+#
+# Usage:
+#   omareel start [area|window|screen] [--no-mic] [--desktop-audio] [--webcam]
+#                 [--no-denoise] [--no-upload] [--region=WxH+X+Y]
+#   omareel stop | cancel | toggle | status | last | open | menu
+#   omareel devices                      # JSON: mics, outputs, cameras
+#   omareel doctor                       # JSON: deps, denoiser in use, upload state
+#   omareel config get | merge '<json>'  # read / deep-merge omareel.json
+#   omareel remote save|status|test      # upload credentials -> rclone.conf
+#   omareel finalize <raw.mp4> [out.mp4]
+#   omareel upload <video.mp4>
+#   omareel setup [--link]               # deps, denoise models, ~/.local/bin link
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(dirname "$(dirname "$SELF")")"
+CONFIG_FILE="${OMAREEL_CONFIG:-$HOME/.config/omarchy/omareel.json}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omareel"
+STATE_FILE="$RUNTIME_DIR/state.json"
+LOG_FILE="$RUNTIME_DIR/omareel.log"
+PID_FILE="$RUNTIME_DIR/gsr.pid"
+MODEL_DIR="$HOME/.local/share/omareel/models"
+RCLONE_CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
+RCLONE_REMOTE="omareel"
+INDEX_FILE_NAME="index.jsonl"
+# Shared with Omarchy's own recorder so omarchy-capture-webcam-resize places
+# the bubble inside the recorded region.
+WEBCAM_REGION_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-screenrecord-region"
+LADSPA_RNNOISE=/usr/lib/ladspa/librnnoise_ladspa.so
+
+mkdir -p "$RUNTIME_DIR"
+
+# ---------------------------------------------------------------- config ---
+
+default_config() {
+  cat <<'JSON'
+{
+  "outputDir": "~/Videos/Omareel",
+  "fps": 30,
+  "codec": "h264",
+  "quality": "very_high",
+  "mic": true,
+  "micDevice": "default",
+  "desktopAudio": false,
+  "desktopDevice": "default",
+  "webcam": false,
+  "webcamDevice": "auto",
+  "webcamSize": "medium",
+  "denoise": true,
+  "denoiseEngine": "auto",
+  "denoiseModel": "bd",
+  "vadThreshold": 50,
+  "keepRaw": true,
+  "upload": {
+    "enabled": false,
+    "provider": "none",
+    "accountId": "",
+    "region": "",
+    "endpoint": "",
+    "bucket": "",
+    "prefix": "",
+    "remote": "",
+    "publicBase": "",
+    "playerPage": true
+  }
+}
+JSON
+}
+
+ensure_config() {
+  if [[ ! -f $CONFIG_FILE ]]; then
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    default_config >"$CONFIG_FILE"
+  fi
+}
+
+# cfg <jq-path> <default>
+cfg() {
+  local value
+  value=$(jq -r --arg d "$2" "$1 // \$d" "$CONFIG_FILE" 2>/dev/null)
+  [[ -n $value && $value != "null" ]] && printf '%s' "$value" || printf '%s' "$2"
+}
+
+# config_merge '<json>' — deep-merge a patch into the config file.
+config_merge() {
+  local patch="$1" tmp
+  jq -e . <<<"$patch" >/dev/null 2>&1 || {
+    echo "config merge: invalid JSON" >&2
+    return 2
+  }
+  tmp="$CONFIG_FILE.tmp"
+  jq --indent 2 --argjson p "$patch" '. * $p' "$CONFIG_FILE" >"$tmp" && mv "$tmp" "$CONFIG_FILE"
+}
+
+expand_home() { printf '%s' "${1/#\~/$HOME}"; }
+
+# ----------------------------------------------------------------- state ---
+
+# set_state phase [key=value ...]   (integers pass through as numbers)
+set_state() {
+  local phase="$1"
+  shift
+  local args=(--arg phase "$phase" --argjson now "$(date +%s)")
+  local filter='{phase: $phase, updatedAt: $now}'
+  local kv key value
+  for kv in "$@"; do
+    key="${kv%%=*}"
+    value="${kv#*=}"
+    if [[ $value =~ ^-?[0-9]+$ ]]; then
+      args+=(--argjson "$key" "$value")
+    else
+      args+=(--arg "$key" "$value")
+    fi
+    filter+=" + {$key: \$$key}"
+  done
+  local previous='{}'
+  [[ -f $STATE_FILE ]] && previous=$(cat "$STATE_FILE")
+  # Carry the recording identity across phases so the UI can keep showing the
+  # target/timer while processing and the URL when done.
+  jq -n "${args[@]}" --argjson prev "$previous" \
+    '($prev | {id, target, targetKind, region, file, startedAt, stoppedAt, url}) + '"$filter" \
+    >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+  omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
+}
+
+state_get() { jq -r ".$1 // empty" "$STATE_FILE" 2>/dev/null; }
+current_phase() { [[ -f $STATE_FILE ]] && state_get phase || echo idle; }
+
+reset_state() {
+  jq -n '{phase: "idle", updatedAt: (now | floor)}' >"$STATE_FILE"
+  rm -f "$PID_FILE"
+  omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
+}
+
+notify() { omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true; }
+log() { echo "$(date '+%F %T') $*" >>"$LOG_FILE"; }
+
+gsr_running() {
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+# --------------------------------------------------------------- devices ---
+
+# JSON lists for the launcher's dropdowns.
+cmd_devices() {
+  local audio
+  audio=$(gpu-screen-recorder --list-audio-devices 2>/dev/null)
+  local cams
+  cams=$(omarchy-capture-webcam-list 2>/dev/null)
+  jq -n --arg audio "$audio" --arg cams "$cams" '
+    def rows: split("\n") | map(select(length > 0));
+    ($audio | rows | map(split("|") | {value: .[0], label: (.[1] // .[0])})) as $a |
+    {
+      mics: ([{value: "default", label: "System default microphone"}]
+             + ($a | map(select(.value != "default_input" and .value != "default_output"
+                                and (.value | endswith(".monitor") | not))))),
+      outputs: ([{value: "default", label: "System default output"}]
+             + ($a | map(select(.value | endswith(".monitor")))
+                  | map(.label |= sub("^Monitor of "; "")))),
+      cameras: ([{value: "auto", label: "First available camera"}]
+             + ($cams | rows | map(capture("^(?<value>/dev/video[0-9]+)\\s+(?<label>.*)$")
+                                 | .label |= (sub("\\s*\\(.*$"; "") | sub(":\\s*$"; "")))))
+    }'
+}
+
+audio_arg() {
+  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices=""
+  if [[ $desktop == true ]]; then
+    [[ $desktop_dev == default || -z $desktop_dev ]] && desktop_dev="default_output"
+    devices="$desktop_dev"
+  fi
+  if [[ $mic == true ]]; then
+    [[ $mic_dev == default || -z $mic_dev ]] && mic_dev="default_input"
+    [[ -n $devices ]] && devices+="|"
+    devices+="$mic_dev"
+  fi
+  printf '%s' "$devices"
+}
+
+# ---------------------------------------------------------------- webcam ---
+
+# start_webcam_overlay <device|auto> <size> <region-or-empty>
+# Same mpv overlay Omarchy's recorder uses, so the WebcamOverlay window rules
+# and omarchy-capture-webcam-resize apply unchanged.
+start_webcam_overlay() {
+  local device="$1" size="$2" region="$3"
+  cleanup_webcam
+
+  if [[ $device == auto || -z $device ]]; then
+    device=$(omarchy-capture-webcam-list | sed -n '1s/[[:space:]].*//p')
+  fi
+  if [[ -z $device || ! -e $device ]]; then
+    notify -u critical -t 3000 "Omareel: no webcam found"
+    return 1
+  fi
+
+  local capture_options="framerate=30" formats resolution
+  formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
+  for resolution in 640x360 1280x720 1920x1080; do
+    if grep -q "$resolution" <<<"$formats"; then
+      capture_options="video_size=$resolution,$capture_options"
+      break
+    fi
+  done
+
+  mpv "av://v4l2:$device" \
+    --profile=low-latency --untimed --no-cache \
+    --demuxer-lavf-o="$capture_options" \
+    '--vf=lavfi=[crop=ih*8/9:ih]' \
+    --title="WebcamOverlay" --wayland-app-id="WebcamOverlay-$size" \
+    --no-border --no-audio --no-osc --osd-level=0 \
+    --really-quiet &>/dev/null &
+
+  local waited=0
+  while ((waited < 40)) && ! hyprctl clients -j | jq -e 'any(.[]; .title == "WebcamOverlay")' >/dev/null 2>&1; do
+    sleep 0.05
+    ((waited++))
+  done
+
+  [[ -n $region ]] && echo "$region" >"$WEBCAM_REGION_FILE"
+  omarchy-capture-webcam-resize "$size" 2>/dev/null || true
+  sleep 0.6
+}
+
+cleanup_webcam() {
+  pkill -f "WebcamOverlay" 2>/dev/null
+  rm -f "$WEBCAM_REGION_FILE"
+}
+
+# ------------------------------------------------------------- recording ---
+
+# Mirrors Omarchy's recorder: monitors above 4K are downscaled to 4K.
+monitor_scale_arg() {
+  local name="$1" width height
+  read -r width height < <(hyprctl monitors -j | jq -r --arg n "$name" '.[] | select(.name == $n) | "\(.width) \(.height)"')
+  if ((width > 3840 || height > 2160)); then
+    echo "-s 3840x2160"
+  fi
+}
+
+pick_area() {
+  # "monitor:NAME" or "X,Y WxH"; non-zero when the picker is cancelled.
+  local picked
+  picked=$(omarchy-capture-region smart --match-monitor) || return 1
+  if [[ $picked == monitor:* ]]; then
+    echo "$picked"
+  elif [[ $picked =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+)$ ]]; then
+    echo "region:${BASH_REMATCH[3]}x${BASH_REMATCH[4]}+${BASH_REMATCH[1]}+${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+}
+
+new_id() {
+  # Timestamp for humans + random suffix so public URLs are not guessable.
+  printf '%s_%s' "$(date +'%Y-%m-%d_%H-%M-%S')" "$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
+}
+
+cmd_start() {
+  local kind="area" mic desktop webcam denoise upload region_override=""
+  mic=$(cfg .mic true)
+  desktop=$(cfg .desktopAudio false)
+  webcam=$(cfg .webcam false)
+  denoise=$(cfg .denoise true)
+  upload=none
+  [[ $(cfg '.upload.enabled' false) == true && $(cfg '.upload.provider' none) != none ]] && upload=rclone
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    area | window | screen) kind="$arg" ;;
+    --no-mic) mic=false ;;
+    --mic) mic=true ;;
+    --desktop-audio) desktop=true ;;
+    --no-desktop-audio) desktop=false ;;
+    --webcam) webcam=true ;;
+    --no-webcam) webcam=false ;;
+    --no-denoise) denoise=false ;;
+    --no-upload) upload=none ;;
+    --region=*) region_override="${arg#*=}" ;;
+    *)
+      echo "unknown argument: $arg" >&2
+      return 2
+      ;;
+    esac
+  done
+
+  if gsr_running; then
+    echo "already recording" >&2
+    return 1
+  fi
+  case "$(current_phase)" in
+  processing | uploading)
+    notify -u critical -t 3000 "Omareel is still finishing the previous recording"
+    return 1
+    ;;
+  esac
+
+  local output_dir
+  output_dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
+  mkdir -p "$output_dir"
+
+  set_state picking targetKind="$kind"
+
+  local target="" capture_args=() label=""
+  if [[ -n $region_override ]]; then
+    target="region:$region_override"
+  else
+    case "$kind" in
+    area)
+      target=$(pick_area) || {
+        reset_state
+        return 1
+      }
+      ;;
+    window)
+      # xdg-desktop-portal window picker: true window capture, occlusion-safe.
+      target="portal"
+      ;;
+    screen)
+      target="monitor:$(omarchy-hyprland-monitor-focused)"
+      ;;
+    esac
+  fi
+
+  local region=""
+  case "$target" in
+  monitor:*)
+    local mon="${target#monitor:}"
+    capture_args=(-w "$mon")
+    read -ra scale < <(monitor_scale_arg "$mon")
+    capture_args+=("${scale[@]}")
+    label="Screen $mon"
+    kind=screen
+    ;;
+  region:*)
+    region="${target#region:}"
+    capture_args=(-w "$region")
+    label="Area ${region%%+*}"
+    kind=area
+    ;;
+  portal)
+    capture_args=(-w portal -restore-portal-session no)
+    label="Window"
+    ;;
+  esac
+
+  # The bubble is a normal window, so it only lands in area/screen captures.
+  if [[ $webcam == true && $target != portal ]]; then
+    start_webcam_overlay "$(cfg .webcamDevice auto)" "$(cfg .webcamSize medium)" "$region" || true
+  fi
+
+  local id raw
+  id=$(new_id)
+  raw="$output_dir/$id.raw.mp4"
+
+  local devices audio_args=()
+  devices=$(audio_arg "$mic" "$(cfg .micDevice default)" "$desktop" "$(cfg .desktopDevice default)")
+  [[ -n $devices ]] && audio_args=(-a "$devices" -ac aac)
+
+  local fps codec quality
+  fps=$(cfg .fps 30)
+  codec=$(cfg .codec h264)
+  quality=$(cfg .quality very_high)
+
+  log "start kind=$kind target=$target audio=${devices:-none} webcam=$webcam"
+  gpu-screen-recorder "${capture_args[@]}" \
+    -k "$codec" -q "$quality" -f "$fps" -fm cfr -cursor yes \
+    -fallback-cpu-encoding yes "${audio_args[@]}" -o "$raw" >>"$LOG_FILE" 2>&1 &
+  local pid=$!
+  echo "$pid" >"$PID_FILE"
+
+  # The portal picker can take a while; wait until gsr starts writing.
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [[ ! -s $raw ]] && ((waited < 600)); do
+    sleep 0.1
+    ((waited++))
+  done
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$raw"
+    cleanup_webcam
+    reset_state
+    if [[ $target == portal ]] && tail -20 "$LOG_FILE" | grep -qi -E 'cancel|denied'; then
+      return 1 # picker cancelled
+    fi
+    notify -u critical -t 5000 "Omareel could not start recording" "See $LOG_FILE"
+    return 1
+  fi
+
+  set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
+    startedAt="$(date +%s)" denoise="$denoise" upload="$upload"
+}
+
+cmd_stop() {
+  local phase
+  phase=$(current_phase)
+  if ! gsr_running; then
+    [[ $phase == recording ]] && reset_state
+    cleanup_webcam
+    echo "not recording" >&2
+    return 1
+  fi
+
+  local pid raw denoise upload
+  pid=$(cat "$PID_FILE")
+  raw=$(state_get file)
+  denoise=$(state_get denoise)
+  upload=$(state_get upload)
+
+  kill -INT "$pid" 2>/dev/null # SIGINT lets gsr write the moov atom
+  local count=0
+  while kill -0 "$pid" 2>/dev/null && ((count < 80)); do
+    sleep 0.1
+    ((count++))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+    notify -u critical -t 5000 "Omareel recording error" "Recorder had to be force-killed; the video may be corrupted."
+  fi
+  rm -f "$PID_FILE"
+  cleanup_webcam
+
+  if [[ ! -s $raw ]]; then
+    reset_state
+    notify -u critical -t 5000 "Omareel recording is empty"
+    return 1
+  fi
+
+  set_state processing progress=0 stoppedAt="$(date +%s)"
+  local final="${raw%.raw.mp4}.mp4"
+  if ! finalize_video "$raw" "$final" "$denoise"; then
+    mv "$raw" "$final" # never lose the take
+  elif [[ $(cfg .keepRaw true) != true ]]; then
+    rm -f "$raw"
+  fi
+
+  local thumb="${final%.mp4}.jpg"
+  make_thumbnail "$final" "$thumb"
+
+  local url="" share
+  if [[ ${upload:-none} != none ]]; then
+    set_state uploading file="$final" progress=0
+    url=$(upload_video "$final" "$thumb") || url=""
+  fi
+
+  share="${url:-$final}"
+  printf '%s' "$share" | wl-copy 2>/dev/null || true
+  append_index "$final" "$url"
+
+  set_state done file="$final" url="$url" progress=100
+  if [[ -n $url ]]; then
+    notify -u normal -t 10000 --image "$thumb" "Omareel link copied" "$url" --exec xdg-open "$url"
+  elif [[ ${upload:-none} != none ]]; then
+    notify -u critical -t 10000 --image "$thumb" "Omareel saved, upload failed" "$final" --exec mpv -- "$final"
+  else
+    notify -u normal -t 10000 --image "$thumb" "Omareel saved" "Path copied · click to play" --exec mpv -- "$final"
+  fi
+  echo "$share"
+
+  (
+    sleep 12
+    [[ $(current_phase) == done ]] && reset_state
+  ) &
+  disown
+}
+
+cmd_cancel() {
+  if gsr_running; then
+    local pid raw
+    pid=$(cat "$PID_FILE")
+    raw=$(state_get file)
+    kill -INT "$pid" 2>/dev/null
+    sleep 0.5
+    kill -9 "$pid" 2>/dev/null
+    [[ -n $raw ]] && rm -f "$raw"
+    notify -t 3000 "Omareel recording discarded"
+  fi
+  cleanup_webcam
+  reset_state
+}
+
+cmd_toggle() {
+  if gsr_running; then
+    cmd_stop
+  else
+    case "$(current_phase)" in
+    processing | uploading) ;;
+    *) cmd_menu ;;
+    esac
+  fi
+}
+
+cmd_menu() {
+  # The bar launcher when the shell has it; else the Omarchy menu tree.
+  if [[ $(omarchy-shell omareel status 2>/dev/null) == idle ]]; then
+    omarchy-shell omareel toggle
+  else
+    omarchy-menu toggle trigger.capture.omareel
+  fi
+}
+
+# ------------------------------------------------------------ processing ---
+
+model_path() {
+  local name="$1"
+  [[ -f $MODEL_DIR/$name.rnnn ]] && echo "$MODEL_DIR/$name.rnnn"
+}
+
+# RNNoise via the LADSPA plugin (package noise-suppression-for-voice) is
+# preferred: ffmpeg 9.0.1's built-in arnndn intermittently emits NaN samples
+# (the AAC encoder then aborts), so arnndn is retried and afftdn is the last resort.
+denoise_engine() {
+  local wanted
+  wanted=$(cfg .denoiseEngine auto)
+  case "$wanted" in
+  ladspa | arnndn | afftdn | off) echo "$wanted"; return ;;
+  esac
+  if [[ -f $LADSPA_RNNOISE ]]; then
+    echo ladspa
+  elif [[ -n $(model_path "$(cfg .denoiseModel bd)") ]]; then
+    echo arnndn
+  else
+    echo afftdn
+  fi
+}
+
+denoise_filter() {
+  case "$1" in
+  ladspa)
+    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0"
+    ;;
+  arnndn)
+    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)")"
+    ;;
+  afftdn)
+    echo "afftdn=nf=-25:tn=1"
+    ;;
+  *) echo "" ;;
+  esac
+}
+
+# finalize_video raw out denoise(true|false)
+finalize_video() {
+  local raw="$1" out="$2" denoise="${3:-true}"
+  [[ -s $raw ]] || return 1
+
+  # Stream-copy unless the first GOP carries discardable warm-up packets.
+  local video_codec=(-c:v copy)
+  if ffprobe -v error -select_streams v:0 -read_intervals %+0.2 -show_entries packet=flags -of csv=p=0 "$raw" 2>/dev/null | grep -q D; then
+    video_codec=(-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
+  fi
+
+  local has_audio=false
+  ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$raw" 2>/dev/null | grep -q audio && has_audio=true
+
+  local engines=()
+  if [[ $has_audio == true && $denoise == true ]]; then
+    case "$(denoise_engine)" in
+    ladspa) engines=(ladspa arnndn afftdn) ;;
+    arnndn) engines=(arnndn arnndn arnndn arnndn afftdn) ;;
+    afftdn) engines=(afftdn) ;;
+    off) engines=(none) ;;
+    esac
+  else
+    engines=(none)
+  fi
+
+  local tmp="${out%.mp4}.processing.mp4" engine
+  for engine in "${engines[@]}"; do
+    local args=(-y -ss 0.1 -i "$raw" "${video_codec[@]}")
+    if [[ $has_audio == true ]]; then
+      # 1. mute the PipeWire capture-open pop, 2. denoise, 3. normalise speech
+      # loudness. Denoise before loudnorm so the gate sees the original levels.
+      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05"
+      local dn
+      dn=$(denoise_filter "$engine")
+      [[ -n $dn ]] && chain+=",$dn"
+      chain+=",loudnorm=I=-16:TP=-1.5:LRA=11"
+      # loudnorm upsamples internally; pin the output back to 48 kHz.
+      args+=(-af "$chain" -ar 48000 -c:a aac -b:a 160k)
+    fi
+    # faststart puts the index at the front so browsers stream instantly.
+    args+=(-movflags +faststart)
+
+    if ffmpeg "${args[@]}" "$tmp" -loglevel error 2>>"$LOG_FILE"; then
+      log "finalize $(basename "$out") denoise=$engine"
+      mv "$tmp" "$out"
+      return 0
+    fi
+    log "finalize: engine $engine failed, trying next"
+    rm -f "$tmp"
+  done
+  return 1
+}
+
+make_thumbnail() {
+  local video="$1" thumb="$2"
+  ffmpeg -y -ss 1 -i "$video" -vframes 1 -vf 'scale=960:-2' -q:v 3 "$thumb" -loglevel quiet 2>/dev/null ||
+    ffmpeg -y -i "$video" -vframes 1 -vf 'scale=960:-2' -q:v 3 "$thumb" -loglevel quiet 2>/dev/null || true
+}
+
+video_duration() {
+  ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null | cut -d. -f1
+}
+
+append_index() {
+  local file="$1" url="$2" dir
+  dir=$(dirname "$file")
+  jq -nc --arg file "$file" --arg url "$url" --argjson dur "${3:-$(video_duration "$file")}" \
+    --arg target "$(state_get target)" \
+    '{file: $file, url: $url, duration: $dur, target: $target, at: (now | floor)}' >>"$dir/$INDEX_FILE_NAME"
+}
+
+# ---------------------------------------------------------------- upload ---
+
+player_page() {
+  local video_url="$1" poster_url="$2" title="$3"
+  cat <<HTML
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>$title</title>
+<meta property="og:type" content="video.other"><meta property="og:title" content="$title">
+<meta property="og:image" content="$poster_url"><meta property="og:video" content="$video_url">
+<style>
+  html,body{margin:0;height:100%;background:#0f1115;color:#e6e6e6;font:15px/1.4 system-ui,sans-serif}
+  main{max-width:1280px;margin:0 auto;padding:24px 16px}
+  video{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  h1{font-size:18px;font-weight:600;margin:16px 0 4px}
+  .meta{color:#9aa0a6;font-size:13px}.meta a{color:#9aa0a6}
+</style></head><body><main>
+<video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video>
+<h1>$title</h1>
+<p class="meta">Recorded with Omareel · <a href="$video_url" download>Download</a></p>
+</main></body></html>
+HTML
+}
+
+# rclone "remote:bucket/prefix" for the configured provider.
+remote_path() {
+  local provider bucket prefix
+  provider=$(cfg '.upload.provider' none)
+  case "$provider" in
+  existing) cfg '.upload.remote' "" ;;
+  none) echo "" ;;
+  *)
+    bucket=$(cfg '.upload.bucket' "")
+    prefix=$(cfg '.upload.prefix' "")
+    prefix="${prefix#/}"
+    prefix="${prefix%/}"
+    [[ -n $bucket ]] || { echo ""; return; }
+    echo "$RCLONE_REMOTE:$bucket${prefix:+/$prefix}"
+    ;;
+  esac
+}
+
+# upload_video <video> [thumb] -> prints the share URL
+upload_video() {
+  local video="$1" thumb="${2:-}"
+  local remote base
+  remote=$(remote_path)
+  base=$(cfg '.upload.publicBase' "")
+  base="${base%/}"
+
+  if [[ -z $remote ]]; then
+    echo "upload: no destination configured (Omareel settings → Sharing)" >&2
+    return 1
+  fi
+  if ! command -v rclone >/dev/null; then
+    echo "upload: rclone is not installed (sudo pacman -S rclone)" >&2
+    return 1
+  fi
+
+  local id
+  id=$(basename "${video%.mp4}")
+  local remote_video="$remote/$id.mp4"
+
+  # Stream progress into the state file so the UI can show a percentage.
+  local progress_log="$RUNTIME_DIR/rclone.log"
+  : >"$progress_log"
+  rclone copyto "$video" "$remote_video" --stats 1s --stats-one-line --stats-log-level NOTICE \
+    --s3-no-check-bucket --ignore-times >"$progress_log" 2>&1 &
+  local rpid=$!
+  while kill -0 "$rpid" 2>/dev/null; do
+    local pct
+    pct=$(grep -oE '[0-9]+%' "$progress_log" | tail -1 | tr -d %)
+    [[ -n $pct ]] && set_state uploading progress="$pct"
+    sleep 1
+  done
+  wait "$rpid" || {
+    echo "upload failed:" >&2
+    tail -5 "$progress_log" >&2
+    log "upload failed: $(tail -1 "$progress_log")"
+    return 1
+  }
+
+  local video_url page_url=""
+  if [[ -n $base ]]; then
+    video_url="$base/$id.mp4"
+  else
+    # Providers without a public base (Drive, Dropbox, OneDrive…) hand out links.
+    video_url=$(rclone link "$remote_video" 2>>"$LOG_FILE") || return 1
+  fi
+
+  [[ -n $thumb && -f $thumb ]] && rclone copyto "$thumb" "$remote/$id.jpg" -q 2>>"$LOG_FILE" || true
+
+  if [[ -n $base && $(cfg '.upload.playerPage' true) == true ]]; then
+    local page="$RUNTIME_DIR/$id.html" title
+    title="Recording $(sed -E 's/_[a-z0-9]{6}$//; s/_/ /; s/-([0-9]{2})-([0-9]{2})$/:\1:\2/' <<<"$id")"
+    player_page "$base/$id.mp4" "$base/$id.jpg" "$title" >"$page"
+    if rclone copyto "$page" "$remote/$id.html" -q 2>>"$LOG_FILE"; then
+      page_url="$base/$id.html"
+    fi
+    rm -f "$page"
+  fi
+
+  echo "${page_url:-$video_url}"
+}
+
+# ---------------------------------------------------------------- remote ---
+# Credentials live only in rclone.conf (mode 600). They reach this script via
+# environment variables so they never appear in argv or in omareel.json.
+
+remote_has_section() {
+  [[ -f $RCLONE_CONF ]] && grep -qx "\[$RCLONE_REMOTE\]" "$RCLONE_CONF"
+}
+
+# remote save — env: OMAREEL_ACCESS_KEY_ID, OMAREEL_SECRET_ACCESS_KEY (blank = keep)
+cmd_remote_save() {
+  local provider endpoint region
+  provider=$(cfg '.upload.provider' none)
+  case "$provider" in
+  none | existing)
+    echo "ok: provider $provider needs no credentials"
+    return 0
+    ;;
+  esac
+  command -v python3 >/dev/null || { echo "python3 is required to write rclone.conf" >&2; return 1; }
+
+  local rprovider="Other"
+  region=$(cfg '.upload.region' "")
+  endpoint=$(cfg '.upload.endpoint' "")
+  case "$provider" in
+  r2)
+    rprovider="Cloudflare"
+    local account
+    account=$(cfg '.upload.accountId' "")
+    [[ -n $account ]] || { echo "Cloudflare account ID is required" >&2; return 1; }
+    endpoint="https://$account.r2.cloudflarestorage.com"
+    region="auto"
+    ;;
+  s3)
+    rprovider="AWS"
+    [[ -n $region ]] || { echo "AWS region is required (e.g. us-east-1)" >&2; return 1; }
+    endpoint=""
+    ;;
+  b2)
+    [[ -n $region ]] || { echo "Backblaze region is required (e.g. us-west-004)" >&2; return 1; }
+    endpoint="https://s3.$region.backblazeb2.com"
+    ;;
+  s3compat)
+    [[ -n $endpoint ]] || { echo "Endpoint URL is required" >&2; return 1; }
+    ;;
+  *)
+    echo "unknown provider: $provider" >&2
+    return 1
+    ;;
+  esac
+
+  mkdir -p "$(dirname "$RCLONE_CONF")"
+  touch "$RCLONE_CONF"
+  chmod 600 "$RCLONE_CONF"
+
+  RCLONE_CONF="$RCLONE_CONF" REMOTE="$RCLONE_REMOTE" RPROVIDER="$rprovider" \
+    ENDPOINT="$endpoint" REGION="$region" python3 - <<'PY' || return 1
+import configparser, os, sys
+path = os.environ["RCLONE_CONF"]
+remote = os.environ["REMOTE"]
+cp = configparser.RawConfigParser()
+cp.optionxform = str
+cp.read(path)
+if not cp.has_section(remote):
+    cp.add_section(remote)
+key = os.environ.get("OMAREEL_ACCESS_KEY_ID", "")
+secret = os.environ.get("OMAREEL_SECRET_ACCESS_KEY", "")
+if not key or not secret:
+    if not (cp.has_option(remote, "access_key_id") and cp.has_option(remote, "secret_access_key")):
+        print("access key and secret are required the first time", file=sys.stderr)
+        sys.exit(1)
+values = {
+    "type": "s3",
+    "provider": os.environ["RPROVIDER"],
+    "no_check_bucket": "true",
+    "acl": "private",
+}
+if key and secret:
+    values["access_key_id"] = key
+    values["secret_access_key"] = secret
+for k in ("endpoint", "region"):
+    if cp.has_option(remote, k):
+        cp.remove_option(remote, k)
+if os.environ["ENDPOINT"]:
+    values["endpoint"] = os.environ["ENDPOINT"]
+if os.environ["REGION"]:
+    values["region"] = os.environ["REGION"]
+for k, v in values.items():
+    cp.set(remote, k, v)
+with open(path, "w") as fh:
+    cp.write(fh, space_around_delimiters=True)
+PY
+  chmod 600 "$RCLONE_CONF"
+  echo "ok: saved rclone remote '$RCLONE_REMOTE' ($rprovider)"
+}
+
+cmd_remote_status() {
+  local provider remote has_secret=false
+  provider=$(cfg '.upload.provider' none)
+  remote=$(remote_path)
+  if remote_has_section && grep -q '^secret_access_key' "$RCLONE_CONF"; then
+    has_secret=true
+  fi
+  jq -n --arg provider "$provider" --arg remote "$remote" --argjson secret "$has_secret" \
+    --argjson rclone "$(command -v rclone >/dev/null && echo true || echo false)" \
+    '{provider: $provider, remote: $remote, hasSecret: $secret, rcloneInstalled: $rclone}'
+}
+
+cmd_remote_test() {
+  local remote base
+  remote=$(remote_path)
+  base=$(cfg '.upload.publicBase' "")
+  base="${base%/}"
+  [[ -n $remote ]] || { echo "no destination configured"; return 1; }
+  command -v rclone >/dev/null || { echo "rclone is not installed: sudo pacman -S rclone"; return 1; }
+
+  local probe="$RUNTIME_DIR/omareel-probe.txt" name
+  name="omareel-probe-$(date +%s).txt"
+  echo "omareel $(date -Is)" >"$probe"
+  if ! out=$(rclone copyto "$probe" "$remote/$name" 2>&1); then
+    echo "upload failed: $(tail -1 <<<"$out")"
+    return 1
+  fi
+  echo "upload ok → $remote/$name"
+  if [[ -n $base ]]; then
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$base/$name")
+    if [[ $code == 200 ]]; then
+      echo "public URL ok → $base/$name"
+    else
+      echo "public URL returned HTTP $code — check the public access setting / URL"
+      rclone deletefile "$remote/$name" -q 2>/dev/null
+      return 1
+    fi
+  else
+    local link
+    if link=$(rclone link "$remote/$name" 2>&1); then
+      echo "share link ok → $link"
+    else
+      echo "rclone link failed: $(tail -1 <<<"$link")"
+      rclone deletefile "$remote/$name" -q 2>/dev/null
+      return 1
+    fi
+  fi
+  rclone deletefile "$remote/$name" -q 2>/dev/null
+  rm -f "$probe"
+  echo "all good"
+}
+
+# ----------------------------------------------------------------- misc ---
+
+cmd_status() {
+  [[ -f $STATE_FILE ]] || jq -n '{phase: "idle", updatedAt: (now | floor)}' >"$STATE_FILE"
+  cat "$STATE_FILE"
+}
+
+cmd_doctor() {
+  local dep missing=()
+  for dep in gpu-screen-recorder ffmpeg ffprobe jq wl-copy slurp omarchy-capture-region mpv v4l2-ctl; do
+    command -v "$dep" >/dev/null || missing+=("$dep")
+  done
+  jq -n --arg engine "$(denoise_engine)" \
+    --argjson ladspa "$([[ -f $LADSPA_RNNOISE ]] && echo true || echo false)" \
+    --argjson models "$([[ -n $(model_path bd) ]] && echo true || echo false)" \
+    --argjson rclone "$(command -v rclone >/dev/null && echo true || echo false)" \
+    --argjson linked "$([[ -e $HOME/.local/bin/omareel ]] && echo true || echo false)" \
+    --arg missing "${missing[*]}" --arg log "$LOG_FILE" --arg version "$(plugin_version)" \
+    '{engine: $engine, ladspa: $ladspa, models: $models, rclone: $rclone, linked: $linked,
+      missing: ($missing | split(" ") | map(select(length > 0))), log: $log, version: $version}'
+}
+
+plugin_version() { jq -r '.version // "dev"' "$PLUGIN_DIR/manifest.json" 2>/dev/null; }
+
+cmd_last() {
+  local dir
+  dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
+  local last
+  last=$(tail -1 "$dir/$INDEX_FILE_NAME" 2>/dev/null) || {
+    echo "no recordings yet" >&2
+    return 1
+  }
+  local share
+  share=$(jq -r 'if .url != "" then .url else .file end' <<<"$last")
+  printf '%s' "$share" | wl-copy 2>/dev/null || true
+  echo "$share"
+}
+
+cmd_open() {
+  local dir
+  dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
+  mkdir -p "$dir"
+  xdg-open "$dir" >/dev/null 2>&1 &
+}
+
+cmd_setup() {
+  ensure_config
+  local ok=true dep
+  for dep in gpu-screen-recorder ffmpeg ffprobe jq wl-copy slurp omarchy-capture-region mpv v4l2-ctl; do
+    if command -v "$dep" >/dev/null; then
+      echo "ok       $dep"
+    else
+      echo "MISSING  $dep"
+      ok=false
+    fi
+  done
+  if command -v rclone >/dev/null; then
+    echo "ok       rclone"
+  else
+    echo "optional rclone (needed for upload): sudo pacman -S rclone"
+  fi
+
+  mkdir -p "$MODEL_DIR"
+  # RNNoise models for ffmpeg's arnndn filter (GregorR/rnnoise-models, BSD).
+  local m name
+  for m in beguiling-drafter-2018-08-30/bd.rnnn somnolent-hogwash-2018-09-01/sh.rnnn; do
+    name=$(basename "$m")
+    if [[ -s $MODEL_DIR/$name ]]; then
+      echo "ok       model $name"
+    elif curl -sSfL -o "$MODEL_DIR/$name" "https://raw.githubusercontent.com/GregorR/rnnoise-models/master/$m"; then
+      echo "fetched  model $name"
+    else
+      echo "FAILED   model $name (denoise falls back to afftdn until fetched)"
+      rm -f "$MODEL_DIR/$name"
+    fi
+  done
+
+  if [[ -f $LADSPA_RNNOISE ]]; then
+    echo "ok       RNNoise LADSPA plugin (preferred denoiser)"
+  else
+    echo "hint     for the most reliable denoiser: sudo pacman -S noise-suppression-for-voice"
+  fi
+
+  if [[ ${1:-} == --link ]]; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$SELF" "$HOME/.local/bin/omareel"
+    echo "linked   ~/.local/bin/omareel -> $SELF"
+  elif [[ ! -e $HOME/.local/bin/omareel ]]; then
+    echo "hint     omareel setup --link   # puts 'omareel' on your PATH for keybindings"
+  fi
+
+  echo
+  echo "denoise: $(denoise_engine)"
+  echo "config:  $CONFIG_FILE"
+  echo "videos:  $(expand_home "$(cfg .outputDir "~/Videos/Omareel")")"
+  echo "upload:  provider=$(cfg '.upload.provider' none) enabled=$(cfg '.upload.enabled' false) remote=$(remote_path)"
+  [[ $ok == true ]]
+}
+
+usage() {
+  sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'
+}
+
+# ------------------------------------------------------------------ main ---
+
+ensure_config
+
+case "${1:-}" in
+start) shift; cmd_start "$@" ;;
+stop) cmd_stop ;;
+cancel) cmd_cancel ;;
+toggle) cmd_toggle ;;
+menu) cmd_menu ;;
+status) cmd_status ;;
+devices) cmd_devices ;;
+doctor) cmd_doctor ;;
+last) cmd_last ;;
+open) cmd_open ;;
+setup) shift; cmd_setup "$@" ;;
+config)
+  case "${2:-get}" in
+  get) cat "$CONFIG_FILE" ;;
+  merge) config_merge "${3:-}" ;;
+  path) echo "$CONFIG_FILE" ;;
+  *) usage; exit 2 ;;
+  esac
+  ;;
+remote)
+  case "${2:-status}" in
+  save) cmd_remote_save ;;
+  status) cmd_remote_status ;;
+  test) cmd_remote_test ;;
+  *) usage; exit 2 ;;
+  esac
+  ;;
+finalize)
+  [[ -n ${2:-} ]] || { usage; exit 2; }
+  finalize_video "$2" "${3:-${2%.raw.mp4}.mp4}" "$(cfg .denoise true)"
+  ;;
+upload)
+  [[ -n ${2:-} ]] || { usage; exit 2; }
+  upload_video "$2" "${2%.mp4}.jpg"
+  ;;
+active) gsr_running ;;
+-h | --help | help | "") usage ;;
+*)
+  echo "unknown command: $1" >&2
+  usage
+  exit 2
+  ;;
+esac
