@@ -127,15 +127,17 @@ Item {
 
       readonly property int pad: Style.space(10)
       readonly property int topOffset: Style.bar.sizeHorizontal + Style.gapsOut * 2
-      readonly property bool atBottom: Omareel.placeAtBottom(root.state, window.screen, width, height, topOffset)
+      // Sized from the row, positioned with x/y: toggling top/bottom anchors
+      // on a property that reads the card's own size is a binding loop that
+      // left the card anchored to both edges (a full-height column).
+      readonly property int cardWidth: row.implicitWidth + pad * 2 + borderLeft + borderRight
+      readonly property int cardHeight: row.implicitHeight + pad * 2 + borderTop + borderBottom
+      readonly property bool atBottom: Omareel.placeAtBottom(root.state, window.screen, cardWidth, cardHeight, topOffset)
 
-      width: row.implicitWidth + pad * 2 + borderLeft + borderRight
-      height: row.implicitHeight + pad * 2 + borderTop + borderBottom
-      anchors.horizontalCenter: parent.horizontalCenter
-      anchors.top: atBottom ? undefined : parent.top
-      anchors.bottom: atBottom ? parent.bottom : undefined
-      anchors.topMargin: topOffset
-      anchors.bottomMargin: Style.space(28)
+      width: cardWidth
+      height: cardHeight
+      x: Math.round((parent.width - width) / 2)
+      y: atBottom ? parent.height - height - Style.space(28) : topOffset
       color: Util.alpha(Color.popups.background, 0.96)
       borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
       radius: Style.cornerRadius
