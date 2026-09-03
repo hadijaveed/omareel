@@ -195,13 +195,19 @@ camera_busy_annotate() {
 }
 
 audio_arg() {
-  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices=""
+  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices="" known
+  known=$(gpu-screen-recorder --list-audio-devices 2>/dev/null | cut -d'|' -f1)
+  # A chosen device that is gone (unplugged headset, docked-off camera mic)
+  # must not stop the take: fall back to the default.
+  audio_known() { [[ -z $known ]] || grep -qxF -- "$1" <<<"$known"; }
   if [[ $desktop == true ]]; then
     [[ $desktop_dev == default || -z $desktop_dev ]] && desktop_dev="default_output"
+    audio_known "$desktop_dev" || { log "audio: $desktop_dev not present, using default_output"; desktop_dev="default_output"; }
     devices="$desktop_dev"
   fi
   if [[ $mic == true ]]; then
     [[ $mic_dev == default || -z $mic_dev ]] && mic_dev="default_input"
+    audio_known "$mic_dev" || { log "audio: $mic_dev not present, using default_input"; mic_dev="default_input"; }
     [[ -n $devices ]] && devices+="|"
     devices+="$mic_dev"
   fi
@@ -1087,15 +1093,17 @@ player_page() {
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="$title">
 <meta name="twitter:image" content="$poster_url">
 <style>
-  html,body{margin:0;height:100%;background:#0f1115;color:#e6e6e6;font:15px/1.4 system-ui,sans-serif}
-  main{max-width:1280px;margin:0 auto;padding:24px 16px}
-  video{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-  h1{font-size:18px;font-weight:600;margin:16px 0 4px}
-  .meta{color:#9aa0a6;font-size:13px}.meta a{color:#9aa0a6}
+  :root{color-scheme:dark}
+  html,body{margin:0;min-height:100%;background:#0b0d12;color:#e8eaed;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:1440px;margin:0 auto;padding:28px 20px 48px}
+  .player{display:flex;justify-content:center;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  video{display:block;width:100%;height:auto;max-height:86vh;background:#000}
+  h1{font-size:20px;font-weight:600;margin:18px 0 4px;letter-spacing:-.01em}
+  .meta{color:#9aa0a6;font-size:13px;margin:0}.meta a{color:#9aa0a6}
 </style></head><body><main>
-<video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video>
+<div class="player"><video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video></div>
 <h1>$title</h1>
-<p class="meta">Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
+<p class="meta">$desc · $(date '+%b %-d, %Y') · Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
 </main></body></html>
 HTML
 }

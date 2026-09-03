@@ -13,8 +13,8 @@ import "Omareel.js" as Omareel
 // / Open / Copy, and "link copied" once uploaded.
 //
 // Hidden for whole-screen recordings, where it would end up in the video.
-// For area recordings it moves to the bottom edge if the region covers the
-// top-centre spot. State comes from $XDG_RUNTIME_DIR/omareel/state.json,
+// For area recordings it picks a spot outside the region (top, bottom, left,
+// right) and hides when none fits. State comes from $XDG_RUNTIME_DIR/omareel/state.json,
 // written by bin/omareel.
 Item {
   id: root
@@ -132,12 +132,16 @@ Item {
       // left the card anchored to both edges (a full-height column).
       readonly property int cardWidth: row.implicitWidth + pad * 2 + borderLeft + borderRight
       readonly property int cardHeight: row.implicitHeight + pad * 2 + borderTop + borderBottom
-      readonly property bool atBottom: Omareel.placeAtBottom(root.state, window.screen, cardWidth, cardHeight, topOffset)
+      // null while a recording's region leaves no spot outside it: the card
+      // hides rather than being recorded (the bar button and the keybinding
+      // still stop the take).
+      readonly property var spot: Omareel.cardPlacement(root.state, window.screen, cardWidth, cardHeight, topOffset, Style.space(28))
 
+      visible: spot !== null
       width: cardWidth
       height: cardHeight
-      x: Math.round((parent.width - width) / 2)
-      y: atBottom ? parent.height - height - Style.space(28) : topOffset
+      x: Math.round(spot ? spot.x : (parent.width - width) / 2)
+      y: Math.round(spot ? spot.y : topOffset)
       color: Util.alpha(Color.popups.background, 0.96)
       borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
       radius: Style.cornerRadius

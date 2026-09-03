@@ -272,8 +272,8 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
 
 - The floating controls are part of the screen, so whole-screen recordings
   hide them (the bar button timer and the keybinding still stop the
-  recording). Area recordings move them to the bottom edge when the region
-  covers the top-centre spot.
+  recording). Area recordings put them at whichever edge is outside the
+  region (top, bottom, left, right) and hide them when none is.
 - **A camera can only stream to one program at a time.** If Chromium,
   Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
   was granted the camera), the camera cannot start. Omareel says so in the
