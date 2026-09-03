@@ -34,7 +34,7 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omareel"
 STATE_FILE="$RUNTIME_DIR/state.json"
 LOG_FILE="$RUNTIME_DIR/omareel.log"
 PID_FILE="$RUNTIME_DIR/gsr.pid"
-CAM_PID_FILE="$RUNTIME_DIR/cam.pid"
+OVERLAY_PID_FILE="$RUNTIME_DIR/overlay.pid"
 MODEL_DIR="$HOME/.local/share/omareel/models"
 RCLONE_CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
 RCLONE_REMOTE="omareel"
@@ -49,8 +49,8 @@ default_config() {
   cat <<'JSON'
 {
   "outputDir": "~/Videos/Omareel",
-  "fps": 30,
-  "codec": "h264",
+  "fps": 60,
+  "codec": "auto",
   "quality": "very_high",
   "mic": true,
   "micDevice": "default",
@@ -61,7 +61,7 @@ default_config() {
   "webcamSize": "medium",
   "webcamShape": "frame",
   "webcamCorner": "bottom-right",
-  "denoise": true,
+  "denoise": false,
   "denoiseEngine": "auto",
   "denoiseModel": "bd",
   "denoiseStrength": "normal",
@@ -195,13 +195,19 @@ camera_busy_annotate() {
 }
 
 audio_arg() {
-  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices=""
+  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices="" known
+  known=$(gpu-screen-recorder --list-audio-devices 2>/dev/null | cut -d'|' -f1)
+  # A chosen device that is gone (unplugged headset, docked-off camera mic)
+  # must not stop the take: fall back to the default like Omarchy's recorder.
+  audio_known() { [[ -z $known ]] || grep -qxF -- "$1" <<<"$known"; }
   if [[ $desktop == true ]]; then
     [[ $desktop_dev == default || -z $desktop_dev ]] && desktop_dev="default_output"
+    audio_known "$desktop_dev" || { log "audio: $desktop_dev not present, using default_output"; desktop_dev="default_output"; }
     devices="$desktop_dev"
   fi
   if [[ $mic == true ]]; then
     [[ $mic_dev == default || -z $mic_dev ]] && mic_dev="default_input"
+    audio_known "$mic_dev" || { log "audio: $mic_dev not present, using default_input"; mic_dev="default_input"; }
     [[ -n $devices ]] && devices+="|"
     devices+="$mic_dev"
   fi
@@ -263,14 +269,10 @@ webcam_device() {
   echo "$device"
 }
 
-# The camera, in every mode, works like a screen studio: one ffmpeg records
-# it to <id>.cam.mp4 (wall-clock timestamps, kept with -copyts so finalize can
-# line it up with the recording) and tees the same frames to an mpv self-view
-# in the corner where the camera will be. The self-view is a floating window
-# that Hyprland hides from window/portal capture, so:
-#   Area/Screen: the self-view sits inside the capture and *is* the camera
-#                in the video, exactly as you see it.
-#   Window:      the capture cannot see it; finalize draws the same frame in.
+# The camera is one mpv window showing the camera, placed in the chosen
+# corner of the recorded region and captured together with everything else
+# on screen — exactly how Omarchy's own recorder does it. Super+drag moves it
+# during the take; what you see is what is recorded.
 # webcam_failed <device> <what> — log it and tell the user why, naming the
 # program that holds the camera when there is one.
 webcam_failed() {
@@ -287,23 +289,24 @@ webcam_failed() {
 # Hyprland's stock rules float/pin classes WebcamOverlay-small|medium|large only.
 overlay_class() { case "$1" in small | medium | large) echo "WebcamOverlay-$1" ;; *) echo "WebcamOverlay-large" ;; esac; }
 
-# start_webcam <device> <out.cam.mp4> [region WxH+X+Y]
-start_webcam() {
-  local device="$1" out="$2" region="${3:-}" formats size="640x360" input=()
+# start_webcam_overlay <device> [region WxH+X+Y]
+start_webcam_overlay() {
+  local device="$1" region="${2:-}" formats size="640x360" opts="framerate=30"
   local bubble_size shape corner
   bubble_size=$(cfg .webcamSize medium)
   shape=$(cfg .webcamShape frame)
   corner=$(cfg .webcamCorner bottom-right)
-  cleanup_webcam # an orphaned capture from a crashed run would hold the camera
+  cleanup_webcam
   formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
   if grep -q MJPG <<<"$formats"; then
-    input=(-input_format mjpeg)
+    opts="input_format=mjpeg,$opts"
     grep -q 1280x720 <<<"$formats" && size="1280x720"
   fi
+  opts="video_size=$size,$opts"
 
-  # Self-view shape: crop to the shape's aspect, then a pre-rendered alpha
-  # mask (alphamerge is a plane copy; a per-frame geq mask ran at 14 fps).
-  local cam_w="${size%x*}" cam_h="${size#*x}" crop_w crop_h mask="$RUNTIME_DIR/selfview-mask.png"
+  # Shape: crop to the aspect, then a pre-rendered alpha mask (alphamerge is
+  # a plane copy — a per-frame geq mask ran at 14 fps and froze the feed).
+  local cam_w="${size%x*}" cam_h="${size#*x}" crop_w crop_h mask="$RUNTIME_DIR/overlay-mask.png"
   case "$shape" in
   circle) crop_w=$((cam_h < cam_w ? cam_h : cam_w)); crop_h=$crop_w ;;
   portrait) crop_w=$((cam_h * 8 / 9)); crop_h=$cam_h ;;
@@ -311,70 +314,38 @@ start_webcam() {
   esac
   bubble_mask_png "$crop_w" "$crop_h" "$shape" "$mask"
 
-  ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
-    -use_wallclock_as_timestamps 1 -i "$device" \
-    -map 0:v -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts \
-    -f tee "[f=mp4:onfail=ignore]$out|[f=nut:onfail=ignore]pipe:1" \
-    2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
-      "--vf=lavfi=[$(bubble_crop "$shape")format=rgba[a];movie=$mask,format=gray[m];[a][m]alphamerge]" \
-      --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
-      --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
-  echo $! >"$CAM_PID_FILE" # right away: nothing backgrounded later may replace it
+  mpv "av://v4l2:$device" \
+    --profile=low-latency --untimed --no-cache --background=none \
+    --demuxer-lavf-o="$opts" \
+    "--vf=lavfi=[$(bubble_crop "$shape")format=rgba[a];movie=$mask,format=gray[m];[a][m]alphamerge]" \
+    --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
+    --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1 &
+  echo $! >"$OVERLAY_PID_FILE"
 
-  ( # put the self-view in its corner once the window exists; say so if it never does
-    local n placed=false
-    for n in $(seq 60); do
-      sleep 0.1
-      if place_overlay "$(overlay_class "$bubble_size")" "$bubble_size" "$shape" "$corner" "$region"; then
-        placed=true
-        break
-      fi
-    done
-    if [[ $placed == true ]]; then
-      log "webcam self-view shown ($(hyprctl -j clients | jq -c 'first(.[] | select(.title == "WebcamOverlay")) | {at, size, ws: .workspace.id}' 2>/dev/null))"
-    elif webcam_capture_alive; then
-      log "webcam self-view window did not appear within 6 s (mpv output above)"
-      notify -u normal -t 6000 "Omareel: camera self-view did not appear" "The camera is still being recorded. See $LOG_FILE"
-    fi
-  ) &
-  disown
-}
-
-# Camera warm-up is ~1 s; wait (bounded) until frames are flowing so the
-# camera is there from the first frame of the recording.
-# wait_webcam_capture <device> <out.cam.mp4>
-wait_webcam_capture() {
-  local device="$1" out="$2" waited=0
-  while ((waited < 25)) && [[ $(stat -c %s "$out" 2>/dev/null || echo 0) -lt 4096 ]]; do
-    if ! webcam_capture_alive; then
-      webcam_failed "$device" "capture exited early"
-      rm -f "$CAM_PID_FILE" "$out"
-      return 1
-    fi
-    sleep 0.1
+  # The move has to settle before the recorder starts, or the camera is
+  # recorded sliding into its corner.
+  local waited=0 mpv_pid
+  mpv_pid=$(cat "$OVERLAY_PID_FILE")
+  while ((waited < 80)) && kill -0 "$mpv_pid" 2>/dev/null && ! hyprctl clients -j | jq -e --arg c "$(overlay_class "$bubble_size")" \
+    'any(.[]; .title == "WebcamOverlay" and .class == $c)' >/dev/null 2>&1; do
+    sleep 0.05
     ((waited++))
   done
-}
-
-stop_webcam_capture() { kill_tracked "$CAM_PID_FILE" ffmpeg; }
-
-webcam_capture_alive() {
-  local pid
-  pid=$(cat "$CAM_PID_FILE" 2>/dev/null) || return 1
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+  if ((waited >= 80)) || ! kill -0 "$mpv_pid" 2>/dev/null; then
+    rm -f "$OVERLAY_PID_FILE"
+    webcam_failed "$device" "overlay window did not appear"
+    return 1
+  fi
+  place_overlay "$(overlay_class "$bubble_size")" "$bubble_size" "$shape" "$corner" "$region" || log "webcam overlay: could not place window"
+  sleep 0.6
 }
 
 cleanup_webcam() {
-  # Self-view first: it is ffmpeg's tee slave, and an ffmpeg blocked on a
-  # full pipe cannot write the mp4 trailer when told to stop.
+  kill_tracked "$OVERLAY_PID_FILE" mpv
   # Anchored to mpv's own command line: a bare -f "WebcamOverlay" also kills
   # any shell or editor whose arguments merely mention the word.
   pkill -f -- '^mpv .*--title=WebcamOverlay' 2>/dev/null
-  stop_webcam_capture
-  # A camera capture whose pid file was lost (crash, old version) would hold
-  # the camera for every later take; only Omareel writes *.cam.mp4 with tee.
-  pkill -INT -f -- '^ffmpeg .*\.cam\.mp4' 2>/dev/null
-  rm -f "$RUNTIME_DIR/selfview-mask.png"
+  rm -f "$RUNTIME_DIR/overlay-mask.png"
 }
 
 # ------------------------------------------------------------- recording ---
@@ -388,10 +359,11 @@ monitor_scale_arg() {
   fi
 }
 
-pick_area() {
-  # "monitor:NAME" or "X,Y WxH"; non-zero when the picker is cancelled.
+# pick_target smart|windows -> "monitor:NAME" or "region:WxH+X+Y" (Omarchy's
+# own picker over a frozen screen); non-zero when the picker is cancelled.
+pick_target() {
   local picked
-  picked=$(omarchy-capture-region smart --match-monitor) || return 1
+  picked=$(omarchy-capture-region "${1:-smart}" --match-monitor) || return 1
   if [[ $picked == monitor:* ]]; then
     echo "$picked"
   elif [[ $picked =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+)$ ]]; then
@@ -463,7 +435,7 @@ cmd_start() {
   mic=$(cfg .mic true)
   desktop=$(cfg .desktopAudio false)
   webcam=$(cfg .webcam false)
-  denoise=$(cfg .denoise true)
+  denoise=$(cfg .denoise false)
   upload=none
   [[ $(cfg '.upload.auto' false) == true ]] && upload_ready && upload=rclone
 
@@ -511,14 +483,18 @@ cmd_start() {
   else
     case "$kind" in
     area)
-      target=$(pick_area) || {
+      target=$(pick_target smart) || {
         reset_state
         return 1
       }
       ;;
     window)
-      # xdg-desktop-portal window picker: true window capture, occlusion-safe.
-      target="portal"
+      # Snap to a window's rectangle: the same screen capture as Area, so
+      # keep the window on top and uncovered while recording.
+      target=$(pick_target windows) || {
+        reset_state
+        return 1
+      }
       ;;
     screen)
       target="monitor:$(omarchy-hyprland-monitor-focused)"
@@ -539,24 +515,16 @@ cmd_start() {
   region:*)
     region="${target#region:}"
     capture_args=(-w "$region")
-    label="Area ${region%%+*}"
-    kind=area
-    ;;
-  portal)
-    capture_args=(-w portal -restore-portal-session no)
-    label="Window"
+    if [[ $kind == window ]]; then label="Window ${region%%+*}"; else label="Area ${region%%+*}"; kind=area; fi
     ;;
   esac
 
-  # The camera starts first: it needs ~1 s to warm up, and the extra footage
-  # before the recording starts is trimmed by finalize.
   local id raw cam_device
   id=$(new_id)
   raw="$output_dir/$id.raw.mp4"
   if [[ $webcam == true ]]; then
     if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
-      start_webcam "$cam_device" "${raw%.raw.mp4}.cam.mp4" "$region"
-      wait_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4" || true
+      start_webcam_overlay "$cam_device" "$region" || true
     else
       notify -u critical -t 3000 "Omareel: no webcam found"
     fi
@@ -566,19 +534,20 @@ cmd_start() {
   devices=$(audio_arg "$mic" "$(cfg .micDevice default)" "$desktop" "$(cfg .desktopDevice default)")
   [[ -n $devices ]] && audio_args=(-a "$devices" -ac aac)
 
+  # Same encoder settings as Omarchy's recorder (-k auto -f 60 -fm cfr).
   local fps codec quality
-  fps=$(cfg .fps 30)
-  codec=$(cfg .codec h264)
+  fps=$(cfg .fps 60)
+  codec=$(cfg .codec auto)
   quality=$(cfg .quality very_high)
 
   log "start kind=$kind target=$target audio=${devices:-none} webcam=$webcam"
   gpu-screen-recorder "${capture_args[@]}" \
-    -k "$codec" -q "$quality" -f "$fps" -fm cfr -cursor yes \
+    -k "$codec" -q "$quality" -f "$fps" -fm cfr \
     -fallback-cpu-encoding yes "${audio_args[@]}" -o "$raw" >>"$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" >"$PID_FILE"
 
-  # The portal picker can take a while; wait until gsr starts writing.
+  # Wait until the recorder starts writing.
   local waited=0
   while kill -0 "$pid" 2>/dev/null && [[ ! -s $raw ]] && ((waited < 600)); do
     sleep 0.1
@@ -587,25 +556,10 @@ cmd_start() {
 
   if ! kill -0 "$pid" 2>/dev/null; then
     cleanup_webcam
-    rm -f "$raw" "${raw%.raw.mp4}.cam.mp4" "${raw%.raw.mp4}.cam.start"
+    rm -f "$raw"
     reset_state
-    if [[ $target == portal ]] && tail -20 "$LOG_FILE" | grep -qi -E 'cancel|denied'; then
-      return 1 # picker cancelled
-    fi
     notify -u critical -t 5000 "Omareel could not start recording" "See $LOG_FILE"
     return 1
-  fi
-
-  # Wall-clock moment the recorder started writing: finalize lines the camera
-  # take up against it.
-  if [[ -f $CAM_PID_FILE ]]; then
-    if webcam_capture_alive; then
-      date +%s.%N >"${raw%.raw.mp4}.cam.start"
-    else
-      webcam_failed "${cam_device:-camera}" "capture exited before the recording started"
-      stop_webcam_capture
-      rm -f "${raw%.raw.mp4}.cam.mp4"
-    fi
   fi
 
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
@@ -649,14 +603,11 @@ cmd_stop() {
 
   set_state processing progress=0 stoppedAt="$(date +%s)"
   local final="${raw%.raw.mp4}.mp4"
-  local composite=false
-  [[ $(state_get targetKind) == window ]] && composite=true
-  if ! finalize_video "$raw" "$final" "$denoise" "$composite"; then
+  if ! finalize_video "$raw" "$final" "$denoise"; then
     mv "$raw" "$final" # never lose the take
   elif [[ $(cfg .keepRaw true) != true ]]; then
-    rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
+    rm -f "$raw"
   fi
-  rm -f "${raw%.raw.mp4}.cam.start"
 
   local thumb="${final%.mp4}.jpg"
   make_thumbnail "$final" "$thumb"
@@ -710,7 +661,7 @@ cmd_cancel() {
     sleep 0.5
     kill -9 "$pid" 2>/dev/null
     stop_webcam_capture
-    [[ -n $raw ]] && rm -f "$raw" "${raw%.raw.mp4}.cam.mp4" "${raw%.raw.mp4}.cam.start"
+    [[ -n $raw ]] && rm -f "$raw"
     notify -t 3000 "Omareel recording discarded"
   fi
   cleanup_webcam
@@ -810,7 +761,7 @@ loudnorm_measure() {
 }
 
 # The camera picture: frame (whole 16:9 image, rounded corners), circle, or
-# portrait (8:9, rounded). Same geometry on screen and in the composite.
+# portrait (8:9, rounded).
 # bubble_size <anchor-height> <size> <shape> -> "w h" in the anchor's pixels
 bubble_size() {
   local anchor_h="$1" size="$2" shape="$3" h w
@@ -850,33 +801,6 @@ bubble_radius() {
   case "$shape" in circle) echo $((h / 2)) ;; *) echo $((h * 8 / 100)) ;; esac
 }
 
-# overlay position expression for a corner, given margin m
-bubble_position() {
-  local corner="$1" m="$2"
-  case "$corner" in
-  top-left) echo "$m:$m" ;;
-  top-right) echo "W-w-$m:$m" ;;
-  bottom-left) echo "$m:H-h-$m" ;;
-  *) echo "W-w-$m:H-h-$m" ;;
-  esac
-}
-
-# Composite path. bubble_filter <video-h> <size> <shape> <corner> <delta-s>
-# Output pad [cam]: RGBA, transparent until the camera's first frame.
-bubble_filter() {
-  local h="$1" size="$2" shape="$3" corner="$4" delta="$5" w bh m
-  read -r w bh <<<"$(bubble_size "$h" "$size" "$shape")"
-  m=$((h * 3 / 100))
-  local timing
-  if awk -v d="$delta" 'BEGIN{exit !(d >= 0)}'; then
-    timing="setpts=PTS-STARTPTS,tpad=start_duration=$delta:color=0x00000000"
-  else
-    timing="trim=start=$(awk -v d="$delta" 'BEGIN{printf "%.3f", -d}'),setpts=PTS-STARTPTS"
-  fi
-  printf '[1:v]%sscale=%d:%d,format=rgba[c];[2:v]format=gray[m];[c][m]alphamerge,%s[cam];[0:v][cam]overlay=%s:eof_action=pass:format=auto[v]' \
-    "$(bubble_crop "$shape")" "$w" "$bh" "$timing" "$(bubble_position "$corner" "$m")"
-}
-
 # bubble_mask_png <w> <h> <shape> <out.png>: the alpha mask rendered once;
 # alphamerge then costs nothing per frame.
 bubble_mask_png() {
@@ -913,9 +837,6 @@ place_overlay() {
     resizewindowpixel "exact $w $h,address:$addr" || return 1
   hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", x = $x, y = $y })" \
     movewindowpixel "exact $x $y,address:$addr"
-  # Invisible to window/portal capture (and to any screen share you run);
-  # KMS area/screen captures still see it, which is what those modes want.
-  hyprctl dispatch "hl.dsp.window.set_prop({ window = \"address:$addr\", prop = \"no_screen_share\", value = 1 })" >/dev/null 2>&1 || true
   hyprctl dispatch "hl.dsp.window.set_prop({ window = \"address:$addr\", prop = \"border_size\", value = 0 })" >/dev/null 2>&1 || true
 }
 
@@ -927,17 +848,18 @@ hypr_dispatch() {
   hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null 2>&1
 }
 
-# finalize_video raw out denoise(true|false) composite(true|false)
-# composite: draw the camera take in (Window recordings; Area/Screen captures
-# already contain the self-view).
+# finalize_video raw out denoise(true|false)
+# Same post-processing as Omarchy's recorder: trim the first frame, mute the
+# capture pop, one-pass loudnorm, stream-copied video (+faststart for the
+# browser). The experimental denoise chain only runs when it is switched on.
 finalize_video() {
-  local raw="$1" out="$2" denoise="${3:-true}" composite="${4:-false}"
+  local raw="$1" out="$2" denoise="${3:-false}"
   [[ -s $raw ]] || return 1
 
   # Stream-copy unless the first GOP carries discardable warm-up packets.
   local video_codec=(-c:v copy)
   if ffprobe -v error -select_streams v:0 -read_intervals %+0.2 -show_entries packet=flags -of csv=p=0 "$raw" 2>/dev/null | grep -q D; then
-    video_codec=(-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
+    video_codec=(-c:v libx264 -preset veryfast -crf 20)
   fi
 
   local has_audio=false
@@ -958,42 +880,28 @@ finalize_video() {
   # Window recordings: the capture never saw the self-view, so draw the camera take in.
   # as a round bubble, aligned by wall-clock: delta = camera start − recording
   # start − the 0.1 s trimmed off the front.
-  local cam="${raw%.raw.mp4}.cam.mp4" cam_args=() cam_filter=""
-  if [[ $composite == true && -f $cam ]] && ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$cam" 2>/dev/null | grep -q video; then
-    local cam_start raw_start height delta mask mask_w mask_h
-    cam_start=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 "$cam")
-    raw_start=$(cat "${cam%.mp4}.start" 2>/dev/null || true)
-    height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$raw")
-    if [[ -n $cam_start && -n $raw_start && -n $height ]]; then
-      delta=$(awk -v c="$cam_start" -v r="$raw_start" 'BEGIN{printf "%.3f", c - r - 0.1}')
-      cam_filter=$(bubble_filter "$height" "$(cfg .webcamSize medium)" "$(cfg .webcamShape frame)" "$(cfg .webcamCorner bottom-right)" "$delta")
-      read -r mask_w mask_h <<<"$(bubble_size "$height" "$(cfg .webcamSize medium)" "$(cfg .webcamShape frame)")"
-      mask="$RUNTIME_DIR/mask-$$.png"
-      bubble_mask_png "$mask_w" "$mask_h" "$(cfg .webcamShape frame)" "$mask"
-      cam_args=(-i "$cam" -loop 1 -i "$mask")
-      video_codec=(-filter_complex "$cam_filter" -map "[v]" -map "0:a?" -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
-      log "finalize: compositing camera bubble (delta ${delta}s)"
-    else
-      log "finalize: camera file present but unreadable; skipping bubble"
-    fi
-  fi
-
   local tmp="${out%.mp4}.processing.mp4" engine
   for engine in "${engines[@]}"; do
-    local args=(-y -ss 0.1 -i "$raw" "${cam_args[@]}" "${video_codec[@]}")
+    local args=(-y -ss 0.1 -i "$raw" "${video_codec[@]}")
     if [[ $has_audio == true ]]; then
       # 1. mute the PipeWire capture-open pop and cut rumble, 2. denoise
       # (blended, tone-corrected), 3. normalise speech loudness in two passes:
       # linear gain sounds natural, the single-pass dynamic mode pumps.
-      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05,highpass=f=80"
-      local dn ln
-      dn=$(denoise_filter "$engine")
-      [[ -n $dn ]] && chain+=",$dn"
-      if ln=$(loudnorm_measure "$raw" "$chain"); then
-        chain+=",$ln"
+      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05"
+      if [[ $denoise == true ]]; then
+        # Experimental: rumble cut → denoise (tone-corrected) → two-pass linear loudnorm.
+        local dn ln
+        chain+=",highpass=f=80"
+        dn=$(denoise_filter "$engine")
+        [[ -n $dn ]] && chain+=",$dn"
+        if ln=$(loudnorm_measure "$raw" "$chain"); then
+          chain+=",$ln"
+        else
+          log "finalize: loudness measurement failed with $engine, trying next"
+          continue
+        fi
       else
-        log "finalize: loudness measurement failed with $engine, trying next"
-        continue
+        chain+=",loudnorm=I=-14:TP=-1.5:LRA=11"
       fi
       # loudnorm upsamples internally; pin the output back to 48 kHz.
       args+=(-af "$chain" -ar 48000 -c:a aac -b:a 160k)
@@ -1004,13 +912,11 @@ finalize_video() {
     if ffmpeg "${args[@]}" "$tmp" -loglevel error 2>>"$LOG_FILE"; then
       log "finalize $(basename "$out") denoise=$engine"
       mv "$tmp" "$out"
-      rm -f "$RUNTIME_DIR/mask-$$.png"
       return 0
     fi
     log "finalize: engine $engine failed, trying next"
     rm -f "$tmp"
   done
-  rm -f "$RUNTIME_DIR/mask-$$.png"
   return 1
 }
 
@@ -1087,15 +993,17 @@ player_page() {
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="$title">
 <meta name="twitter:image" content="$poster_url">
 <style>
-  html,body{margin:0;height:100%;background:#0f1115;color:#e6e6e6;font:15px/1.4 system-ui,sans-serif}
-  main{max-width:1280px;margin:0 auto;padding:24px 16px}
-  video{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-  h1{font-size:18px;font-weight:600;margin:16px 0 4px}
-  .meta{color:#9aa0a6;font-size:13px}.meta a{color:#9aa0a6}
+  :root{color-scheme:dark}
+  html,body{margin:0;min-height:100%;background:#0b0d12;color:#e8eaed;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:1440px;margin:0 auto;padding:28px 20px 48px}
+  .player{display:flex;justify-content:center;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  video{display:block;width:100%;height:auto;max-height:86vh;background:#000}
+  h1{font-size:20px;font-weight:600;margin:18px 0 4px;letter-spacing:-.01em}
+  .meta{color:#9aa0a6;font-size:13px;margin:0}.meta a{color:#9aa0a6}
 </style></head><body><main>
-<video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video>
+<div class="player"><video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video></div>
 <h1>$title</h1>
-<p class="meta">Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
+<p class="meta">$desc · $(date '+%b %-d, %Y') · Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
 </main></body></html>
 HTML
 }

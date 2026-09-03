@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "hadijaveed.omareel",
   "name": "Omareel",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "author": "hadijaveed",
   "homepage": "https://github.com/hadijaveed/omareel",
   "description": "Loom-style screen recording for Omarchy: record an area, window, or screen with a webcam bubble and your chosen mic, clean up the audio, upload to R2/S3/B2, and copy a share link. Floating controls while recording plus a bar launcher with in-widget settings.",

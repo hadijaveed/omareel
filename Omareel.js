@@ -67,17 +67,27 @@ function regionOf(state) {
   return { w: +m[1], h: +m[2], x: +m[3], y: +m[4] }
 }
 
-// True when the floating controls, centred at the top of `screen`, would sit
-// inside the recorded region; the panel then moves to the bottom edge.
-function placeAtBottom(state, screen, cardWidth, cardHeight, topOffset) {
+// Where the floating controls go so they never end up inside the recorded
+// region: top centre, else bottom centre, else left or right middle. Returns
+// {x, y} in the layer's coordinates, or null when nothing fits (hide them).
+function cardPlacement(state, screen, cardWidth, cardHeight, topOffset, margin) {
+  if (!screen) return null
+  var sx = screen.x || 0, sy = screen.y || 0, sw = screen.width || 0, sh = screen.height || 0
+  var spots = [
+    { x: (sw - cardWidth) / 2, y: topOffset },
+    { x: (sw - cardWidth) / 2, y: sh - cardHeight - margin },
+    { x: margin, y: (sh - cardHeight) / 2 },
+    { x: sw - cardWidth - margin, y: (sh - cardHeight) / 2 },
+  ]
   var r = regionOf(state)
-  if (!r || !screen) return false
-  var sx = screen.x || 0, sy = screen.y || 0, sw = screen.width || 0
-  var cx0 = sx + (sw - cardWidth) / 2, cx1 = cx0 + cardWidth
-  var cy0 = sy + topOffset, cy1 = cy0 + cardHeight
-  var overlapsX = r.x < cx1 && r.x + r.w > cx0
-  var overlapsY = r.y < cy1 && r.y + r.h > cy0
-  return overlapsX && overlapsY
+  for (var i = 0; i < spots.length; i++) {
+    var c = spots[i]
+    if (!r) return c
+    var cx0 = sx + c.x, cx1 = cx0 + cardWidth, cy0 = sy + c.y, cy1 = cy0 + cardHeight
+    var overlaps = r.x < cx1 && r.x + r.w > cx0 && r.y < cy1 && r.y + r.h > cy0
+    if (!overlaps) return c
+  }
+  return null
 }
 
 function screenNamed(screens, name) {

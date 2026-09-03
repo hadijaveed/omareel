@@ -7,7 +7,7 @@ import "Omareel.js" as Omareel
 
 // Bar launcher for Omareel: a record glyph (with a live timer while recording)
 // that opens a Loom-style start panel — pick Area / Window / Screen, choose
-// microphone, system-audio source and webcam, flip noise removal and upload,
+// microphone, system-audio source and webcam, flip automatic upload,
 // and a settings page (gear) for recording quality and the upload destination
 // (Cloudflare R2, AWS S3, Backblaze B2, any S3 endpoint, or an existing
 // rclone remote). Credentials go straight to rclone.conf via bin/omareel and
@@ -52,7 +52,7 @@ Panel {
   readonly property bool micOn: Omareel.get(config, "mic", true) === true
   readonly property bool desktopOn: Omareel.get(config, "desktopAudio", false) === true
   readonly property bool webcamOn: Omareel.get(config, "webcam", false) === true
-  readonly property bool denoiseOn: Omareel.get(config, "denoise", true) === true
+  readonly property bool denoiseOn: Omareel.get(config, "denoise", false) === true
   readonly property string provider: String(Omareel.get(config, "upload.provider", "none"))
   readonly property bool uploadReady: Omareel.uploadReady(config, remoteStatus)
   readonly property bool uploadAuto: uploadReady && Omareel.get(config, "upload.auto", false) === true
@@ -568,7 +568,7 @@ Panel {
             Button {
               iconText: "󰖯"
               text: "Window"
-              tooltipText: "Pick an app; it stays captured even when covered (camera is composited in after Stop)"
+              tooltipText: "Click a window to snap to it; keep it on top and uncovered while recording"
               onClicked: root.start("window")
             }
             Button {
@@ -661,13 +661,6 @@ Panel {
           Column {
             visible: root.idle || root.finished
             width: parent.width
-            Toggle {
-              width: parent.width
-              label: "Noise removal"
-              description: "RNNoise clean-up of the microphone after recording"
-              checked: root.denoiseOn
-              onClicked: root.setConfig("denoise", !root.denoiseOn)
-            }
             Row {
               visible: root.webcamOn
               width: parent.width
@@ -960,7 +953,14 @@ Panel {
           }
 
           // -- Noise removal --
-          Heading { text: "Noise removal" }
+          Heading { text: "Noise removal (experimental)" }
+          Toggle {
+            width: parent.width
+            label: "Remove background noise"
+            description: "Off by default: RNNoise can thin the voice. Audio otherwise gets the same one-pass loudness fix as Omarchy's recorder."
+            checked: root.denoiseOn
+            onClicked: root.setConfig("denoise", !root.denoiseOn)
+          }
           Dropdown {
             width: parent.width
             label: "Engine"

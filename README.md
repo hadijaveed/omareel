@@ -27,19 +27,20 @@ upload it, or copy its link or path:
 
 ## What it does
 
-- **Record** an area (drag, or click a window to snap to it), a single window
-  (via the portal picker, so it stays captured even when covered), or the
-  focused monitor. GPU encoding through `gpu-screen-recorder`.
+- **Record** an area (drag, or click a window to snap to it), a window
+  (snap to its rectangle), or the focused monitor. The capture is Omarchy's
+  own recorder path: the same picker, the same `gpu-screen-recorder` flags
+  (60 fps, GPU encode), the same one-pass audio clean-up. Omareel adds the
+  controls, titles, uploads and share links on top.
 - **Camera frame** in any corner of the recording: a rounded 16:9 frame
   (the Loom look), a circle, or a portrait card, in four sizes, any camera.
-  It works the same way in every mode, like a screen studio: the camera is
-  recorded to its own file and a self-view floats in the corner where the
-  frame will be. Area and Screen captures include that self-view as-is;
-  a Window capture cannot see it, so the frame is drawn in after Stop.
+  It is one floating window that the capture sees, just like Omarchy's own
+  recorder: what you see is what is recorded, and Super+drag moves it
+  anywhere during the take.
 - **Pick your microphone** and your system-audio source from dropdowns.
-- **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
-  track after the recording, blended so the voice keeps its body, tone
-  corrected, then two-pass loudness normalisation to speech level.
+- **Audio like the stock recorder.** Microphone and system audio merged into
+  one track, the capture pop muted, one-pass loudness normalisation. RNNoise
+  clean-up exists behind an experimental switch in settings, off by default.
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.
 - **Share only what you choose.** After Stop the banner offers **Upload**;
@@ -157,9 +158,9 @@ Credentials are stored by `omareel remote save` in
 `~/.config/omarchy/omareel.json` holds only the non-secret settings, which
 makes it safe to keep in a dotfiles repo.
 
-## Noise removal
+## Noise removal (experimental, off by default)
 
-The chain is: cut rumble below 80 Hz → denoise → tone correction → two-pass
+When switched on, the chain is: cut rumble below 80 Hz → denoise → tone correction → two-pass
 `loudnorm` to −16 LUFS. RNNoise at full strength thins a voice out and makes
 it sound shrill (measured on a real take: spectral centroid 2.7 → 3.4 kHz,
 +2 dB above 3 kHz). Blending the raw signal back in fixes the tone but lets
@@ -247,13 +248,13 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
 launcher / keybind / menu
         │
         ▼
-bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC); ffmpeg records the camera to
-                             <id>.cam.mp4 and tees it to an mpv self-view (masked, hidden from window capture)
+bin/omareel start …          omarchy-capture-region picker → gpu-screen-recorder -k auto -f 60 -fm cfr
+                             (+ mpv camera window in the corner of the region, as Omarchy's recorder)
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
-        ├─ ffmpeg: trim pop → highpass → denoise (blend + shelf) → 2-pass loudnorm → +faststart
-        │          + camera frame overlay (shape/corner/size) for Window recordings
+        ├─ ffmpeg: trim first frame → mute capture pop → loudnorm → +faststart (video stream-copied)
+        │          (experimental denoise chain only when switched on)
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
@@ -272,18 +273,16 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
 
 - The floating controls are part of the screen, so whole-screen recordings
   hide them (the bar button timer and the keybinding still stop the
-  recording). Area recordings move them to the bottom edge when the region
-  covers the top-centre spot.
+  recording). Area recordings put them at whichever edge is outside the
+  region (top, bottom, left, right) and hide them when none is.
 - **A camera can only stream to one program at a time.** If Chromium,
   Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
   was granted the camera), the camera cannot start. Omareel says so in the
   launcher ("In use by Chromium") and in a notification, and records without
   the camera. End the call or close that tab, then record again.
-- Window recordings with the camera on are re-encoded once to composite the
-  camera frame, so they take a few extra seconds to finish. The camera take is kept
-  as `<id>.cam.mp4` next to the raw file while *Keep raw* is on.
-- Window mode uses the xdg-desktop-portal picker. If it fails on your GPU,
-  use Area and click the window: the picker snaps to it.
+- Window mode snaps the capture to a window's rectangle; it is the same
+  screen capture as Area, so anything covering the window is recorded too.
+  Keep it on top while recording.
 - No pause/resume yet.
 
 ## Developing
