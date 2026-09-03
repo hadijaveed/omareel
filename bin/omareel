@@ -17,6 +17,7 @@
 #   omareel stop | cancel | dismiss | toggle | status | last | open | menu
 #   omareel upload last|<video.mp4> [--title="…"]   # share one recording
 #   omareel rename last|<video.mp4> "<title>"        # rename the local files (+ thumbnail, raw)
+#   omareel page last|<video.mp4>                    # re-upload only the share page (new design)
 #   omareel copy   last|<video.mp4>                  # copy its link, or path if local
 #   omareel devices                      # JSON: mics, outputs, cameras
 #   omareel doctor                       # JSON: deps, denoiser in use, upload state
@@ -1098,15 +1099,18 @@ player_page() {
 <style>
   :root{color-scheme:dark}
   html,body{margin:0;min-height:100%;background:#0b0d12;color:#e8eaed;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-  main{max-width:1440px;margin:0 auto;padding:28px 20px 48px}
-  .player{display:flex;justify-content:center;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
-  video{display:block;width:100%;height:auto;max-height:86vh;background:#000}
+  main{padding:20px 24px 40px;text-align:center}
+  /* The frame hugs the video: sized by the video's own aspect, as tall as the
+     viewport allows, never a letterboxed 16:9 box. */
+  .player{display:inline-block;max-width:100%;line-height:0;border-radius:14px;overflow:hidden;background:#000;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  video{display:block;width:auto;height:auto;max-width:100%;max-height:calc(100vh - 140px);min-width:min(960px,100%)}
+  .about{max-width:1440px;margin:0 auto;text-align:left}
   h1{font-size:20px;font-weight:600;margin:18px 0 4px;letter-spacing:-.01em}
   .meta{color:#9aa0a6;font-size:13px;margin:0}.meta a{color:#9aa0a6}
 </style></head><body><main>
-<div class="player"><video controls playsinline preload="metadata" poster="$poster_url" src="$video_url"></video></div>
-<h1>$title</h1>
-<p class="meta">$desc · $(date '+%b %-d, %Y') · Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p>
+<div class="player"><video controls playsinline preload="metadata" width="$w" height="$h" poster="$poster_url" src="$video_url"></video></div>
+<div class="about"><h1>$title</h1>
+<p class="meta">$desc · $(date '+%b %-d, %Y') · Recorded with <a href="https://github.com/hadijaveed/omareel">Omareel</a></p></div>
 </main></body></html>
 HTML
 }
@@ -1200,6 +1204,39 @@ upload_video() {
   fi
 
   echo "${page_url:-$video_url}"
+}
+
+# cmd_page last|<video.mp4> — re-render and re-upload only the share page of a
+# recording that is already uploaded (after a page design change; the video
+# stays where it is).
+cmd_page() {
+  local file entry id title url base remote
+  file=$(resolve_recording "${1:-last}") || return 1
+  entry=$(index_entry "$file")
+  url=$(jq -r '.url // empty' <<<"$entry")
+  if [[ -z $url ]]; then
+    echo "page: $(basename "$file") is not uploaded yet — use: omareel upload" >&2
+    return 1
+  fi
+  id=$(jq -r '.id // empty' <<<"$entry")
+  title=$(jq -r '.title // empty' <<<"$entry")
+  [[ -n $id ]] || id=$(basename "${file%.mp4}")
+  [[ -n $title ]] || title="Recording $(date -r "$file" '+%Y-%m-%d %H:%M')"
+  base=$(cfg '.upload.publicBase' ""); base="${base%/}"
+  remote=$(remote_path)
+  if [[ -z $base || -z $remote ]]; then
+    echo "page: needs a public base URL and a destination (Omareel settings → Sharing)" >&2
+    return 1
+  fi
+  local page="$RUNTIME_DIR/$id.html"
+  player_page "$base/$id.mp4" "$base/$id.jpg" "$title" "$file" "$base/$id.html" >"$page"
+  rclone copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2>>"$LOG_FILE" || {
+    rm -f "$page"
+    echo "page: upload failed (see $LOG_FILE)" >&2
+    return 1
+  }
+  rm -f "$page"
+  echo "$base/$id.html"
 }
 
 # cmd_upload last|<video.mp4> [--title=…]
@@ -1579,6 +1616,7 @@ finalize)
   finalize_video "$2" "${3:-${2%.raw.mp4}.mp4}" "$(cfg .denoise true)"
   ;;
 upload) shift; cmd_upload "$@" ;;
+page) shift; cmd_page "$@" ;;
 rename) shift; cmd_rename "$@" ;;
 copy) cmd_copy "${2:-last}" ;;
 active) gsr_running ;;
