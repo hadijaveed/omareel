@@ -91,9 +91,11 @@ ensure_config() {
 }
 
 # cfg <jq-path> <default>
+# cfg <jq-path> <default>. Not `//`: jq's alternative operator treats false
+# like null, which made every toggle switched off read as its default.
 cfg() {
   local value
-  value=$(jq -r --arg d "$2" "$1 // \$d" "$CONFIG_FILE" 2>/dev/null)
+  value=$(jq -r "$1" "$CONFIG_FILE" 2>/dev/null)
   [[ -n $value && $value != "null" ]] && printf '%s' "$value" || printf '%s' "$2"
 }
 
