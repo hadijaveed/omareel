@@ -141,7 +141,8 @@ set_state() {
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
 
-state_get() { jq -r ".$1 // empty" "$STATE_FILE" 2>/dev/null; }
+# state_get <key>: empty when unset (jq's // would also swallow a false).
+state_get() { jq -r "if .$1 == null then empty else .$1 end" "$STATE_FILE" 2>/dev/null; }
 current_phase() { [[ -f $STATE_FILE ]] && state_get phase || echo idle; }
 
 reset_state() {
