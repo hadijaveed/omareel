@@ -159,23 +159,27 @@ makes it safe to keep in a dotfiles repo.
 
 ## Noise removal
 
-The chain is: cut rumble below 80 Hz → denoise → tone correction → two-pass
-`loudnorm` to −16 LUFS. RNNoise at full strength thins a voice out and makes
-it sound shrill (measured on a real take: spectral centroid 2.7 → 3.4 kHz,
-+2 dB above 3 kHz). Blending the raw signal back in fixes the tone but lets
-the room noise back in with it, so instead the suppression stays at full
-strength and an EQ pair (−3 dB high shelf above 4 kHz, +1.5 dB low shelf
-below 200 Hz) puts the body back; measured against the raw take the bands
-land within half a decibel. **Strength** in settings: *Normal* as above,
-*Light* keeps 30 % of the raw signal for the most natural voice in a quiet
-room, *Strong* is full suppression without the low-shelf lift for very noisy
-rooms. Two-pass loudness normalisation applies one linear gain instead of the
-single-pass dynamic mode, which pumps and exaggerates sibilance.
+Microphone and desktop audio are captured as separate tracks. Only the
+microphone goes through the speech chain: convert to 48 kHz mono → apply a
+configurable pre-gain → cut rumble below 70 Hz → denoise → subtle warmth EQ →
+light compression → two-pass `loudnorm` to −16 LUFS → a −1.5 dB true-peak
+safety limiter. Desktop audio is mixed back afterwards at 50 %, so denoising
+never damages music or application sound.
 
-The engine setting `auto` picks, in order:
+**Strength** controls the whole cleanup profile: *Natural* uses minimal
+processing, *Clean* applies gentle FFT noise reduction and is the default, and
+*Strong* uses RNNoise for difficult rooms. LADSPA stays fully wet because its
+retroactive VAD adds latency; blending an immediate dry path with it would
+create an audible doubled voice. The default RNNoise VAD threshold is 50 %,
+with 300 ms tail grace and 50 ms retroactive grace to keep word endings and
+beginnings intact.
+
+The engine setting `auto` selects the transparent `afftdn` cleanup for Natural
+and Clean, and RNNoise LADSPA for Strong when the plugin is installed. An
+explicit engine selection overrides that behavior:
 
 1. **RNNoise LADSPA plugin** from the `noise-suppression-for-voice` package.
-   Reliable and the same plugin a live PipeWire "clean mic" setup uses.
+   Aggressive suppression for a difficult room.
 2. **ffmpeg `arnndn`** with the models `omareel setup` downloads. ffmpeg
    9.0.1's `arnndn` intermittently emits NaN samples, which makes the AAC
    encoder abort, so Omareel retries it a few times before falling back.
@@ -227,8 +231,12 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "denoise": true,
   "denoiseEngine": "auto",    // auto | ladspa | arnndn | afftdn | off
   "denoiseModel": "bd",       // arnndn model: bd (general) | sh (speech)
-  "denoiseStrength": "normal", // light (30 % raw blended back) | normal (full + EQ) | strong (full, no low lift)
-  "vadThreshold": 50,         // LADSPA gate, %; lower if word starts get clipped
+  "denoiseStrength": "normal", // light/natural | normal/clean | strong
+  "micGainDb": 0,             // optional pre-gain; first set the system mic near 80 %
+  "vadThreshold": 50,         // LADSPA voice gate, %
+  "vadGraceMs": 300,          // keep word and sentence endings
+  "vadRetroactiveMs": 50,     // recover beginnings; adds this much denoiser latency
+  "desktopMix": 0.5,          // desktop level when mixed with a microphone
   "keepRaw": true,
   "upload": {
     "auto": false,              // true: upload every recording without asking
@@ -252,7 +260,8 @@ bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC); ffmpeg records
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
-        ├─ ffmpeg: trim pop → highpass → denoise (blend + shelf) → 2-pass loudnorm → +faststart
+        ├─ ffmpeg: mic → highpass → RNNoise → voice EQ/compression
+        │          desktop audio → mix after cleanup → 2-pass loudnorm/limiter → +faststart
         │          + camera frame overlay (shape/corner/size) for Window recordings
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification

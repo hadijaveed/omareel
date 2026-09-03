@@ -663,8 +663,8 @@ Panel {
             width: parent.width
             Toggle {
               width: parent.width
-              label: "Noise removal"
-              description: "RNNoise clean-up of the microphone after recording"
+              label: "Voice clean-up"
+              description: "Denoise, tone and levelling on the microphone; desktop audio untouched"
               checked: root.denoiseOn
               onClicked: root.setConfig("denoise", !root.denoiseOn)
             }
@@ -978,15 +978,20 @@ Panel {
             width: parent.width
             label: "Strength"
             options: [
-              { value: "light", label: "Light — most natural voice" },
-              { value: "normal", label: "Normal — voice first, noise mostly gone" },
-              { value: "strong", label: "Strong — noisy rooms; can sound thin" }
+              { value: "light", label: "Natural — minimal processing" },
+              { value: "normal", label: "Clean — gentle noise removal" },
+              { value: "strong", label: "Strong — RNNoise for noisy rooms" }
             ]
             value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
             onChanged: function(v) { root.setConfig("denoiseStrength", v) }
           }
           Hint {
             text: "Active: " + String(root.doctor.engine || "…")
+              + " · microphone only · 48 kHz mono"
+              + (root.doctor.micVolumeLow === true
+                  ? "\nInput is only " + String(root.doctor.micVolumePercent) + "% ("
+                    + String(root.doctor.micVolumeDb) + " dB). Raise the system microphone near 80%."
+                  : "")
               + (root.doctor.ladspa === false ? "\nFor the most reliable clean-up:  sudo pacman -S noise-suppression-for-voice" : "")
           }
 

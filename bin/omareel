@@ -61,12 +61,17 @@ default_config() {
   "webcamDevice": "auto",
   "webcamSize": "medium",
   "webcamShape": "frame",
-  "webcamCorner": "bottom-right",
+  "webcamPosition": "bottom-right",
+  "webcamZoom": "full",
   "denoise": true,
   "denoiseEngine": "auto",
   "denoiseModel": "bd",
   "denoiseStrength": "normal",
+  "micGainDb": 0,
   "vadThreshold": 50,
+  "vadGraceMs": 300,
+  "vadRetroactiveMs": 50,
+  "desktopMix": 0.5,
   "keepRaw": true,
   "upload": {
     "auto": false,
@@ -198,24 +203,25 @@ camera_busy_annotate() {
   echo "$json"
 }
 
-audio_arg() {
-  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" devices="" known
+audio_sources() {
+  local mic="$1" mic_dev="$2" desktop="$3" desktop_dev="$4" known
   known=$(gpu-screen-recorder --list-audio-devices 2>/dev/null | cut -d'|' -f1)
   # A chosen device that is gone (unplugged headset, docked-off camera mic)
   # must not stop the take: fall back to the default.
   audio_known() { [[ -z $known ]] || grep -qxF -- "$1" <<<"$known"; }
-  if [[ $desktop == true ]]; then
-    [[ $desktop_dev == default || -z $desktop_dev ]] && desktop_dev="default_output"
-    audio_known "$desktop_dev" || { log "audio: $desktop_dev not present, using default_output"; desktop_dev="default_output"; }
-    devices="$desktop_dev"
-  fi
+  # Keep the microphone first and desktop audio second. Repeating `-a` gives
+  # gpu-screen-recorder separate tracks, so voice cleanup never denoises music
+  # or application audio.
   if [[ $mic == true ]]; then
     [[ $mic_dev == default || -z $mic_dev ]] && mic_dev="default_input"
     audio_known "$mic_dev" || { log "audio: $mic_dev not present, using default_input"; mic_dev="default_input"; }
-    [[ -n $devices ]] && devices+="|"
-    devices+="$mic_dev"
+    printf 'mic\t%s\n' "$mic_dev"
   fi
-  printf '%s' "$devices"
+  if [[ $desktop == true ]]; then
+    [[ $desktop_dev == default || -z $desktop_dev ]] && desktop_dev="default_output"
+    audio_known "$desktop_dev" || { log "audio: $desktop_dev not present, using default_output"; desktop_dev="default_output"; }
+    printf 'desktop\t%s\n' "$desktop_dev"
+  fi
 }
 
 # ---------------------------------------------------------------- webcam ---
@@ -297,13 +303,13 @@ webcam_failed() {
 # Hyprland's stock rules float/pin classes WebcamOverlay-small|medium|large only.
 overlay_class() { case "$1" in small | medium | large) echo "WebcamOverlay-$1" ;; *) echo "WebcamOverlay-large" ;; esac; }
 
-# start_webcam <device> <out.cam.mp4> [region WxH+X+Y]
+# start_webcam <device> <out.cam.mp4> [region] [size] [shape] [position] [zoom]
 start_webcam() {
   local device="$1" out="$2" region="${3:-}" formats size="640x360" input=()
-  local bubble_size shape corner
-  bubble_size=$(cfg .webcamSize medium)
-  shape=$(cfg .webcamShape frame)
-  corner=$(cfg .webcamCorner bottom-right)
+  local bubble_size="${4:-$(cfg .webcamSize medium)}"
+  local shape="${5:-$(cfg .webcamShape frame)}"
+  local position="${6:-$(webcam_position)}"
+  local zoom="${7:-$(cfg .webcamZoom full)}"
   cleanup_webcam # an orphaned capture from a crashed run would hold the camera
   formats=$(v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null)
   if grep -q MJPG <<<"$formats"; then
@@ -314,11 +320,7 @@ start_webcam() {
   # Self-view shape: crop to the shape's aspect, then a pre-rendered alpha
   # mask (alphamerge is a plane copy; a per-frame geq mask ran at 14 fps).
   local cam_w="${size%x*}" cam_h="${size#*x}" crop_w crop_h mask="$RUNTIME_DIR/selfview-mask.png"
-  case "$shape" in
-  circle) crop_w=$((cam_h < cam_w ? cam_h : cam_w)); crop_h=$crop_w ;;
-  portrait) crop_w=$((cam_h * 8 / 9)); crop_h=$cam_h ;;
-  *) crop_w=$cam_w; crop_h=$cam_h ;;
-  esac
+  read -r crop_w crop_h <<<"$(camera_crop_size "$cam_w" "$cam_h" "$shape" "$zoom")"
   bubble_mask_png "$crop_w" "$crop_h" "$shape" "$mask"
 
   ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate 30 -video_size "$size" \
@@ -326,7 +328,7 @@ start_webcam() {
     -map 0:v -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts \
     -f tee "[f=mp4:onfail=ignore]$out|[f=nut:onfail=ignore]pipe:1" \
     2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
-      "--vf=lavfi=[$(bubble_crop "$shape")format=rgba[a];movie=$mask,format=gray[m];[a][m]alphamerge]" \
+      "--vf=lavfi=[$(bubble_crop "$shape" "$zoom")scale=$crop_w:$crop_h,format=rgba[a];movie=$mask,format=gray[m];[a][m]alphamerge]" \
       --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
       --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
   echo $! >"$CAM_PID_FILE" # right away: nothing backgrounded later may replace it
@@ -335,7 +337,7 @@ start_webcam() {
     local n placed=false
     for n in $(seq 60); do
       sleep 0.1
-      if place_overlay "$(overlay_class "$bubble_size")" "$bubble_size" "$shape" "$corner" "$region"; then
+      if place_overlay "$(overlay_class "$bubble_size")" "$bubble_size" "$shape" "$position" "$region"; then
         placed=true
         break
       fi
@@ -572,16 +574,21 @@ cmd_start() {
     fi
   fi
 
-  local devices audio_args=()
-  devices=$(audio_arg "$mic" "$(cfg .micDevice default)" "$desktop" "$(cfg .desktopDevice default)")
-  [[ -n $devices ]] && audio_args=(-a "$devices" -ac aac)
+  local audio_desc="" audio_args=() audio_role audio_source
+  while IFS=$'\t' read -r audio_role audio_source; do
+    [[ -n $audio_source ]] || continue
+    audio_args+=(-a "$audio_source")
+    [[ -n $audio_desc ]] && audio_desc+=","
+    audio_desc+="$audio_role:$audio_source"
+  done < <(audio_sources "$mic" "$(cfg .micDevice default)" "$desktop" "$(cfg .desktopDevice default)")
+  ((${#audio_args[@]} == 0)) || audio_args+=(-ac aac)
 
   local fps codec quality
   fps=$(cfg .fps 30)
   codec=$(cfg .codec h264)
   quality=$(cfg .quality very_high)
 
-  log "start kind=$kind target=$target audio=${devices:-none} webcam=$webcam"
+  log "start kind=$kind target=$target audio=${audio_desc:-none} webcam=$webcam"
   gpu-screen-recorder "${capture_args[@]}" \
     -k "$codec" -q "$quality" -f "$fps" -fm cfr -cursor yes \
     -fallback-cpu-encoding yes "${audio_args[@]}" -o "$raw" >>"$LOG_FILE" 2>&1 &
@@ -619,7 +626,7 @@ cmd_start() {
   fi
 
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
-    startedAt="$(date +%s)" denoise="$denoise" upload="$upload"
+    startedAt="$(date +%s)" denoise="$denoise" upload="$upload" mic="$mic" desktop="$desktop"
 }
 
 cmd_stop() {
@@ -632,11 +639,15 @@ cmd_stop() {
     return 1
   fi
 
-  local pid raw denoise upload
+  local pid raw denoise upload mic desktop
   pid=$(cat "$PID_FILE")
   raw=$(state_get file)
   denoise=$(state_get denoise)
   upload=$(state_get upload)
+  mic=$(state_get mic)
+  desktop=$(state_get desktop)
+  [[ -n $mic ]] || mic=$(cfg .mic true)
+  [[ -n $desktop ]] || desktop=$(cfg .desktopAudio false)
 
   kill -INT "$pid" 2>/dev/null # SIGINT lets gsr write the moov atom
   local count=0
@@ -661,7 +672,7 @@ cmd_stop() {
   local final="${raw%.raw.mp4}.mp4"
   local composite=false
   [[ $(state_get targetKind) == window ]] && composite=true
-  if ! finalize_video "$raw" "$final" "$denoise" "$composite"; then
+  if ! finalize_video "$raw" "$final" "$denoise" "$composite" "$mic" "$desktop"; then
     mv "$raw" "$final" # never lose the take
   elif [[ $(cfg .keepRaw true) != true ]]; then
     rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
@@ -754,64 +765,121 @@ model_path() {
   [[ -f $MODEL_DIR/$name.rnnn ]] && echo "$MODEL_DIR/$name.rnnn"
 }
 
-# RNNoise via the LADSPA plugin (package noise-suppression-for-voice) is
-# preferred: ffmpeg 9.0.1's built-in arnndn intermittently emits NaN samples
-# (the AAC encoder then aborts), so arnndn is retried and afftdn is the last resort.
+# Auto keeps the natural voice-preserving FFT cleanup for Natural/Clean and
+# reserves fully wet RNNoise for Strong. Fully wet RNNoise is effective in a
+# difficult room, but it audibly smears quiet, close-mic recordings.
 denoise_engine() {
-  local wanted
+  local wanted strength
   wanted=$(cfg .denoiseEngine auto)
   case "$wanted" in
   ladspa | arnndn | afftdn | off) echo "$wanted"; return ;;
   esac
-  if [[ -f $LADSPA_RNNOISE ]]; then
+  strength=$(cfg .denoiseStrength normal)
+  if [[ $strength == strong && -f $LADSPA_RNNOISE ]]; then
     echo ladspa
-  elif [[ -n $(model_path "$(cfg .denoiseModel bd)") ]]; then
-    echo arnndn
   else
     echo afftdn
   fi
 }
 
-# How much of the denoised signal to use. RNNoise at full strength thins the
-# voice out (measured: spectral centroid 2.7 → 3.4 kHz, +2 dB above 3 kHz),
-# which is what "shrill" sounds like; 70 % keeps the body of the voice.
+# Wet/dry balance used by ffmpeg's arnndn filter. The LADSPA plugin must stay
+# fully wet: retroactive VAD adds latency, so parallel dry audio would produce
+# audible doubling/comb filtering. Its warmth is restored by the EQ below.
 denoise_mix() {
   case "$(cfg .denoiseStrength normal)" in
-  light) echo 0.7 ;; # lets ~30 % of the room through; most natural voice
-  *) echo 1.0 ;;     # full suppression; the EQ below restores the body
+  light) echo 0.75 ;;
+  strong) echo 1.0 ;;
+  *) echo 0.90 ;;
   esac
 }
 
-# Applied after every denoiser: pull the top back and the body up to where the
-# raw take was (measured: full RNNoise + this shelf pair lands within 0.5 dB).
+# A small low shelf adds body without cutting the upper harmonics that make
+# speech intelligible. The prior broad treble cuts were the source of the
+# muffled sound on the Blue microphone.
 denoise_tone() {
   case "$(cfg .denoiseStrength normal)" in
-  light) echo "highshelf=f=4000:g=-2.5" ;;
-  strong) echo "highshelf=f=4000:g=-3" ;;
-  *) echo "highshelf=f=4000:g=-3,lowshelf=f=200:g=1.5" ;;
+  light) echo "lowshelf=f=180:g=0.5" ;;
+  strong) echo "lowshelf=f=180:g=1,equalizer=f=3500:t=q:w=1.2:g=-1" ;;
+  *) echo "lowshelf=f=180:g=1,equalizer=f=3500:t=q:w=1.2:g=-0.5" ;;
   esac
 }
 
-denoise_filter() {
-  case "$1" in
+# Light parallel compression evens out speech before loudness normalization,
+# without flattening the transients that make a voice sound close and natural.
+voice_compressor() {
+  case "$(cfg .denoiseStrength normal)" in
+  light) echo "anull" ;;
+  strong) echo "acompressor=threshold=0.1:ratio=2:attack=12:release=130:knee=3:makeup=1:mix=0.75" ;;
+  *) echo "acompressor=threshold=0.125:ratio=1.5:attack=15:release=150:knee=2.8:makeup=1:mix=0.5" ;;
+  esac
+}
+
+afftdn_filter() {
+  case "$(cfg .denoiseStrength normal)" in
+  light) echo "afftdn=nr=4:nf=-45:tn=1:gs=3" ;;
+  strong) echo "afftdn=nr=10:nf=-35:tn=1:gs=7" ;;
+  *) echo "afftdn=nr=6:nf=-40:tn=1:gs=5" ;;
+  esac
+}
+
+# voice_graph <input-label> <engine> <output-label>
+# Produces a complete labeled filtergraph fragment for the microphone track.
+voice_graph() {
+  local input="$1" engine="$2" output="$3" wet base tone compressor denoiser
+  wet=$(denoise_mix)
+  base="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,volume=$(cfg .micGainDb 0)dB,highpass=f=70"
+  tone=$(denoise_tone)
+  compressor=$(voice_compressor)
+  case "$engine" in
   ladspa)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono,ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=200|c2=0,$(denoise_tone)"
+    # noise-suppression-for-voice 1.21 exposes a fourth control, c3
+    # "Placeholder": ffmpeg refuses the plugin unless it is set ("Control c3
+    # must be set"), so keep c3=0 even though it does nothing.
+    # Keep this path fully wet because retroactive VAD deliberately delays it.
+    denoiser="ladspa=file=librnnoise_ladspa:plugin=noise_suppressor_mono:c=c0=$(cfg .vadThreshold 50)|c1=$(cfg .vadGraceMs 300)|c2=$(cfg .vadRetroactiveMs 50)|c3=0:latency=1"
+    echo "[$input]$base,$denoiser,$tone,$compressor[$output]"
     ;;
   arnndn)
-    echo "aformat=sample_fmts=fltp:sample_rates=48000,arnndn=m=$(model_path "$(cfg .denoiseModel bd)"):mix=$(denoise_mix),$(denoise_tone)"
+    echo "[$input]$base,arnndn=m=$(model_path "$(cfg .denoiseModel bd)"):mix=$wet,$tone,$compressor[$output]"
     ;;
   afftdn)
-    echo "afftdn=nr=10:nf=-30:tn=1"
+    echo "[$input]$base,$(afftdn_filter),$tone,$compressor[$output]"
     ;;
-  *) echo "" ;;
+  *)
+    # Clean-up off: only the capture-pop mute and the format the mixer
+    # expects. No gain, tone or compression — the take is left as recorded.
+    echo "[$input]volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[$output]"
+    ;;
   esac
 }
 
-# loudnorm_args <input> <chain> -> the two-pass (linear) loudnorm filter, or
-# fails when the measurement pass hit the arnndn NaN bug.
-loudnorm_measure() {
-  local raw="$1" chain="$2" j
-  j=$(ffmpeg -hide_banner -nostdin -vn -i "$raw" -af "$chain,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json" -f null - 2>&1 | sed -n '/^{/,/^}/p')
+# audio_graph <stream-count> <mic-bool> <desktop-bool> <engine>
+# New recordings store mic and desktop audio as separate streams. Older
+# one-stream combined recordings remain recoverable and are treated as voice.
+audio_graph() {
+  local streams="$1" mic="$2" desktop="$3" engine="$4" graph
+  if [[ $mic == true ]]; then
+    graph=$(voice_graph "0:a:0" "$engine" voice)
+    if [[ $desktop == true && $streams -gt 1 ]]; then
+      graph+=";[voice]pan=stereo|c0=c0|c1=c0[voice_stereo]"
+      graph+=";[0:a:1]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=$(cfg .desktopMix 0.5)[desktop]"
+      graph+=";[voice_stereo][desktop]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0[premaster]"
+    else
+      [[ $desktop != true || $streams -gt 1 ]] || log "finalize: legacy combined audio track; denoising the combined track"
+      graph+=";[voice]anull[premaster]"
+    fi
+  else
+    graph="[0:a:0]aformat=sample_fmts=fltp:sample_rates=48000[premaster]"
+  fi
+  echo "$graph"
+}
+
+# Measure the exact post-denoise/mix signal for the second loudnorm pass.
+loudnorm_measure_graph() {
+  local raw="$1" graph="$2" j
+  j=$(ffmpeg -hide_banner -nostdin -vn -i "$raw" -filter_complex \
+    "$graph;[premaster]loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json[meter]" \
+    -map "[meter]" -f null - 2>&1 | sed -n '/^{/,/^}/p')
   local mi mt ml mth off
   mi=$(jq -r '.input_i // empty' <<<"$j" 2>/dev/null)
   [[ $mi == -* ]] || return 1
@@ -819,8 +887,60 @@ loudnorm_measure() {
   echo "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=$mi:measured_TP=$mt:measured_LRA=$ml:measured_thresh=$mth:offset=$off:linear=true"
 }
 
-# The camera picture: frame (whole 16:9 image, rounded corners), circle, or
-# portrait (8:9, rounded). Same geometry on screen and in the composite.
+# Resolve the new position key while preserving configurations from <= 0.7.7.
+webcam_position() {
+  local position
+  position=$(cfg .webcamPosition "")
+  [[ -n $position ]] || position=$(cfg .webcamCorner bottom-right)
+  case "$position" in
+  top-left | top-center | top-right | center-left | center-right | bottom-left | bottom-center | bottom-right)
+    echo "$position"
+    ;;
+  *) echo bottom-right ;;
+  esac
+}
+
+webcam_zoom_percent() {
+  case "$1" in
+  close) echo 125 ;;
+  tight) echo 150 ;;
+  *) echo 100 ;;
+  esac
+}
+
+webcam_shape_ratio() {
+  case "$1" in
+  circle) echo "1 1" ;;
+  classic) echo "4 3" ;;
+  portrait) echo "8 9" ;;
+  *) echo "16 9" ;;
+  esac
+}
+
+# camera_crop_size <input-w> <input-h> <shape> <zoom> -> even crop dimensions.
+# The live mask uses these exact dimensions; export uses the equivalent
+# expression in bubble_crop before scaling to the requested overlay size.
+camera_crop_size() {
+  local iw="$1" ih="$2" shape="$3" zoom="$4" rw rh pct bw bh
+  read -r rw rh <<<"$(webcam_shape_ratio "$shape")"
+  pct=$(webcam_zoom_percent "$zoom")
+  if ((iw * rh > ih * rw)); then
+    bh=$ih
+    bw=$((ih * rw / rh))
+  else
+    bw=$iw
+    bh=$((iw * rh / rw))
+  fi
+  bw=$((bw * 100 / pct / 2 * 2))
+  bh=$((bh * 100 / pct / 2 * 2))
+  ((bw >= 2)) || bw=2
+  ((bh >= 2)) || bh=2
+  echo "$bw $bh"
+}
+
+# The camera picture can be landscape (16:9), classic rectangle (4:3),
+# portrait (8:9), or a circle. The same geometry drives the live self-view and
+# the exported composite.
 # bubble_size <anchor-height> <size> <shape> -> "w h" in the anchor's pixels
 bubble_size() {
   local anchor_h="$1" size="$2" shape="$3" h w
@@ -832,19 +952,21 @@ bubble_size() {
   esac
   case "$shape" in
   circle) w=$h ;;
+  classic) w=$((h * 4 / 3)) ;;
   portrait) w=$((h * 8 / 9)) ;;
   *) w=$((h * 16 / 9)) ;;
   esac
   echo "$((w / 2 * 2)) $((h / 2 * 2))"
 }
 
-# crop filter that gives the shape its aspect from the camera's frame
+# Center crop to the selected aspect and zoom. Zooming crops rather than
+# stretching, so faces retain their proportions in every frame style.
 bubble_crop() {
-  case "$1" in
-  circle) echo "crop=min(iw\,ih):min(iw\,ih)," ;;
-  portrait) echo "crop=ih*8/9:ih," ;;
-  *) echo "" ;;
-  esac
+  local rw rh pct
+  read -r rw rh <<<"$(webcam_shape_ratio "$1")"
+  pct=$(webcam_zoom_percent "${2:-full}")
+  printf "crop=trunc(min(iw\\,ih*%d/%d)*100/%d/2)*2:trunc(min(ih\\,iw*%d/%d)*100/%d/2)*2:(iw-ow)/2:(ih-oh)/2," \
+    "$rw" "$rh" "$pct" "$rh" "$rw" "$pct"
 }
 
 # anti-aliased rounded-rectangle alpha (0..255) with corner radius <r>;
@@ -860,21 +982,25 @@ bubble_radius() {
   case "$shape" in circle) echo $((h / 2)) ;; *) echo $((h * 8 / 100)) ;; esac
 }
 
-# overlay position expression for a corner, given margin m
+# overlay position expression for one of eight safe-edge anchors.
 bubble_position() {
-  local corner="$1" m="$2"
-  case "$corner" in
+  local position="$1" m="$2"
+  case "$position" in
   top-left) echo "$m:$m" ;;
+  top-center) echo "(W-w)/2:$m" ;;
   top-right) echo "W-w-$m:$m" ;;
+  center-left) echo "$m:(H-h)/2" ;;
+  center-right) echo "W-w-$m:(H-h)/2" ;;
   bottom-left) echo "$m:H-h-$m" ;;
+  bottom-center) echo "(W-w)/2:H-h-$m" ;;
   *) echo "W-w-$m:H-h-$m" ;;
   esac
 }
 
-# Composite path. bubble_filter <video-h> <size> <shape> <corner> <delta-s>
+# Composite path. bubble_filter <video-h> <size> <shape> <position> <zoom> <delta-s>
 # Output pad [cam]: RGBA, transparent until the camera's first frame.
 bubble_filter() {
-  local h="$1" size="$2" shape="$3" corner="$4" delta="$5" w bh m
+  local h="$1" size="$2" shape="$3" position="$4" zoom="$5" delta="$6" w bh m
   read -r w bh <<<"$(bubble_size "$h" "$size" "$shape")"
   m=$((h * 3 / 100))
   local timing
@@ -884,7 +1010,7 @@ bubble_filter() {
     timing="trim=start=$(awk -v d="$delta" 'BEGIN{printf "%.3f", -d}'),setpts=PTS-STARTPTS"
   fi
   printf '[1:v]%sscale=%d:%d,format=rgba[c];[2:v]format=gray[m];[c][m]alphamerge,%s[cam];[0:v][cam]overlay=%s:eof_action=pass:format=auto[v]' \
-    "$(bubble_crop "$shape")" "$w" "$bh" "$timing" "$(bubble_position "$corner" "$m")"
+    "$(bubble_crop "$shape" "$zoom")" "$w" "$bh" "$timing" "$(bubble_position "$position" "$m")"
 }
 
 # bubble_mask_png <w> <h> <shape> <out.png>: the alpha mask rendered once;
@@ -897,9 +1023,9 @@ bubble_mask_png() {
 
 # Place the on-screen camera window (mpv, found by class) in the chosen corner
 # of the anchor: the recorded region "WxH+X+Y", or the focused monitor.
-# place_overlay <class> <size> <shape> <corner> [region]
+# place_overlay <class> <size> <shape> <position> [region]
 place_overlay() {
-  local class="$1" size="$2" shape="$3" corner="$4" region="${5:-}" addr ax ay aw ah
+  local class="$1" size="$2" shape="$3" position="$4" region="${5:-}" addr ax ay aw ah
   addr=$(hyprctl -j clients | jq -r --arg c "$class" 'first(.[] | select(.class == $c and .title == "WebcamOverlay")) | .address // empty')
   [[ -n $addr ]] || return 1
   if [[ $region =~ ^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$ ]]; then
@@ -913,10 +1039,14 @@ place_overlay() {
   local w h m x y
   read -r w h <<<"$(bubble_size "$ah" "$size" "$shape")"
   m=$((ah * 3 / 100))
-  case "$corner" in
+  case "$position" in
   top-left) x=$((ax + m)); y=$((ay + m)) ;;
+  top-center) x=$((ax + (aw - w) / 2)); y=$((ay + m)) ;;
   top-right) x=$((ax + aw - w - m)); y=$((ay + m)) ;;
+  center-left) x=$((ax + m)); y=$((ay + (ah - h) / 2)) ;;
+  center-right) x=$((ax + aw - w - m)); y=$((ay + (ah - h) / 2)) ;;
   bottom-left) x=$((ax + m)); y=$((ay + ah - h - m)) ;;
+  bottom-center) x=$((ax + (aw - w) / 2)); y=$((ay + ah - h - m)) ;;
   *) x=$((ax + aw - w - m)); y=$((ay + ah - h - m)) ;;
   esac
   hypr_dispatch "hl.dsp.window.resize({ window = \"address:$addr\", x = $w, y = $h })" \
@@ -937,11 +1067,12 @@ hypr_dispatch() {
   hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null 2>&1
 }
 
-# finalize_video raw out denoise(true|false) composite(true|false)
+# finalize_video raw out denoise(true|false) composite(true|false) mic desktop
 # composite: draw the camera take in (Window recordings; Area/Screen captures
 # already contain the self-view).
 finalize_video() {
   local raw="$1" out="$2" denoise="${3:-true}" composite="${4:-false}"
+  local mic="${5:-true}" desktop="${6:-false}"
   [[ -s $raw ]] || return 1
 
   # Stream-copy unless the first GOP carries discardable warm-up packets.
@@ -950,14 +1081,17 @@ finalize_video() {
     video_codec=(-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
   fi
 
-  local has_audio=false
+  local has_audio=false audio_streams=0
   ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$raw" 2>/dev/null | grep -q audio && has_audio=true
+  if [[ $has_audio == true ]]; then
+    audio_streams=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$raw" 2>/dev/null | wc -l)
+  fi
 
   local engines=()
-  if [[ $has_audio == true && $denoise == true ]]; then
+  if [[ $has_audio == true && $mic == true && $denoise == true ]]; then
     case "$(denoise_engine)" in
     ladspa) engines=(ladspa arnndn afftdn) ;;
-    arnndn) engines=(arnndn arnndn arnndn arnndn afftdn) ;;
+    arnndn) engines=(arnndn arnndn afftdn) ;;
     afftdn) engines=(afftdn) ;;
     off) engines=(none) ;;
     esac
@@ -968,7 +1102,7 @@ finalize_video() {
   # Window recordings: the capture never saw the self-view, so draw the camera take in.
   # as a round bubble, aligned by wall-clock: delta = camera start − recording
   # start − the 0.1 s trimmed off the front.
-  local cam="${raw%.raw.mp4}.cam.mp4" cam_args=() cam_filter=""
+  local cam="${raw%.raw.mp4}.cam.mp4" cam_args=() cam_filter="" video_map=(-map 0:v:0)
   if [[ $composite == true && -f $cam ]] && ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$cam" 2>/dev/null | grep -q video; then
     local cam_start raw_start height delta mask mask_w mask_h
     cam_start=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 "$cam")
@@ -981,7 +1115,8 @@ finalize_video() {
       mask="$RUNTIME_DIR/mask-$$.png"
       bubble_mask_png "$mask_w" "$mask_h" "$(cfg .webcamShape frame)" "$mask"
       cam_args=(-i "$cam" -loop 1 -i "$mask")
-      video_codec=(-filter_complex "$cam_filter" -map "[v]" -map "0:a?" -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
+      video_map=(-map "[v]")
+      video_codec=(-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
       log "finalize: compositing camera bubble (delta ${delta}s)"
     else
       log "finalize: camera file present but unreadable; skipping bubble"
@@ -990,24 +1125,22 @@ finalize_video() {
 
   local tmp="${out%.mp4}.processing.mp4" engine
   for engine in "${engines[@]}"; do
-    local args=(-y -ss 0.1 -i "$raw" "${cam_args[@]}" "${video_codec[@]}")
+    local args=(-y -ss 0.1 -i "$raw" "${cam_args[@]}")
+    local filter_graph="$cam_filter" audio_filter="" ln=""
+    local audio_map=(-an)
     if [[ $has_audio == true ]]; then
-      # 1. mute the PipeWire capture-open pop and cut rumble, 2. denoise
-      # (blended, tone-corrected), 3. normalise speech loudness in two passes:
-      # linear gain sounds natural, the single-pass dynamic mode pumps.
-      local chain="volume=enable='lt(t,0.4)':volume=0,afade=t=in:st=0.4:d=0.05,highpass=f=80"
-      local dn ln
-      dn=$(denoise_filter "$engine")
-      [[ -n $dn ]] && chain+=",$dn"
-      if ln=$(loudnorm_measure "$raw" "$chain"); then
-        chain+=",$ln"
-      else
+      audio_filter=$(audio_graph "$audio_streams" "$mic" "$desktop" "$engine")
+      if ! ln=$(loudnorm_measure_graph "$raw" "$audio_filter"); then
         log "finalize: loudness measurement failed with $engine, trying next"
         continue
       fi
-      # loudnorm upsamples internally; pin the output back to 48 kHz.
-      args+=(-af "$chain" -ar 48000 -c:a aac -b:a 160k)
+      audio_filter+=";[premaster]$ln,alimiter=limit=0.841:attack=5:release=80:level=false:latency=true[aout]"
+      [[ -n $filter_graph ]] && filter_graph+=";"
+      filter_graph+="$audio_filter"
+      audio_map=(-map "[aout]" -ar 48000 -c:a aac -b:a 192k)
     fi
+    [[ -n $filter_graph ]] && args+=(-filter_complex "$filter_graph")
+    args+=("${video_map[@]}" "${audio_map[@]}" "${video_codec[@]}" -map_metadata 0)
     # faststart puts the index at the front so browsers stream instantly.
     args+=(-movflags +faststart)
 
@@ -1483,17 +1616,28 @@ cmd_status() {
 }
 
 cmd_doctor() {
-  local dep missing=()
+  local dep missing=() mic_device mic_volume_line="" mic_volume_percent="" mic_volume_db=""
   for dep in gpu-screen-recorder ffmpeg ffprobe jq wl-copy slurp omarchy-capture-region mpv v4l2-ctl; do
     command -v "$dep" >/dev/null || missing+=("$dep")
   done
+  mic_device=$(cfg .micDevice default)
+  if command -v pactl >/dev/null 2>&1; then
+    [[ $mic_device != default ]] || mic_device=$(pactl get-default-source 2>/dev/null)
+    mic_volume_line=$(pactl get-source-volume "$mic_device" 2>/dev/null | head -1)
+    mic_volume_percent=$(grep -oE '[0-9]+%' <<<"$mic_volume_line" | head -1 | tr -d %)
+    mic_volume_db=$(grep -oE -- '-?[0-9]+([.][0-9]+)? dB' <<<"$mic_volume_line" | head -1 | cut -d' ' -f1)
+  fi
   jq -n --arg engine "$(denoise_engine)" \
     --argjson ladspa "$([[ -f $LADSPA_RNNOISE ]] && echo true || echo false)" \
     --argjson models "$([[ -n $(model_path bd) ]] && echo true || echo false)" \
     --argjson rclone "$(command -v rclone >/dev/null && echo true || echo false)" \
     --argjson linked "$([[ -e $HOME/.local/bin/omareel ]] && echo true || echo false)" \
     --arg missing "${missing[*]}" --arg log "$LOG_FILE" --arg version "$(plugin_version)" \
+    --arg micVolumePercent "$mic_volume_percent" --arg micVolumeDb "$mic_volume_db" \
     '{engine: $engine, ladspa: $ladspa, models: $models, rclone: $rclone, linked: $linked,
+      micVolumePercent: (if $micVolumePercent == "" then null else ($micVolumePercent | tonumber) end),
+      micVolumeDb: (if $micVolumeDb == "" then null else ($micVolumeDb | tonumber) end),
+      micVolumeLow: (if $micVolumePercent == "" then false else (($micVolumePercent | tonumber) < 70) end),
       missing: ($missing | split(" ") | map(select(length > 0))), log: $log, version: $version}'
 }
 
