@@ -133,6 +133,9 @@ omareel setup --link
 Stop recording/processing before updating. Settings, recordings and upload
 credentials live outside the plugin checkout and are retained. Do not edit
 installed plugin files: local modifications can prevent a fast-forward update.
+If the shell still displays an older launcher after an update, run
+`omarchy restart shell` once while no recording is active; this reloads the
+bar/panels without closing your applications.
 `setup --link` refuses to overwrite an unrelated command. If it reports a
 conflict, inspect and move that existing command aside yourself before retrying.
 For removal, use `omarchy plugin remove hadijaveed.omareel`; your recordings,

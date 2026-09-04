@@ -3,6 +3,7 @@
 import array
 import json
 import math
+import random
 import os
 from pathlib import Path
 import subprocess
@@ -102,7 +103,17 @@ class AudioRegression(unittest.TestCase):
 
     def test_room_noise_is_not_restored_by_natural_component(self):
         self.settings["vadThreshold"] = 50
-        samples = self.render("0.02*(random(0)-0.5)", self.graph(), 4)
+        # Use identical PCM across FFmpeg releases instead of depending on
+        # lavfi's version-specific random() generator. Keep the 20 dB target.
+        rng = random.Random(42)
+        source = array.array("f", (0.02*(rng.random()-0.5) for _ in range(4*48000)))
+        if sys.byteorder != "little":
+            source.byteswap()
+        result = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "f32le",
+            "-ar", "48000", "-ac", "1", "-i", "pipe:0", "-filter_complex", self.graph(),
+            "-map", "[out]", "-f", "f32le", "-"], input=source.tobytes(),
+            capture_output=True, check=True, timeout=20)
+        samples = pcm(result.stdout)
         rms = math.sqrt(sum(x*x for x in samples[48000:]) / (len(samples)-48000))
         self.assertLess(rms, (0.02 / math.sqrt(12)) / 10)
 
