@@ -68,18 +68,21 @@ function regionOf(state) {
 }
 
 // Where the floating controls go so they never end up inside the recorded
-// region: top centre, else bottom centre, else left or right middle. Returns
-// {x, y} in the layer's coordinates, or null when nothing fits (hide them).
+// region: top centre, else bottom centre. The region is unsafe only while the
+// recorder is active; once processing/done begins, capture has stopped and the
+// saved-actions card can always use the normal top position. Side fallbacks
+// looked awkward and could expose a KMS/off-monitor edge case, so no safe
+// horizontal strip means hide the live card and leave stopping to the movable
+// system-bar widget.
+// Returns {x, y} in the layer's coordinates, or null when nothing fits.
 function cardPlacement(state, screen, cardWidth, cardHeight, topOffset, margin) {
   if (!screen) return null
   var sx = screen.x || 0, sy = screen.y || 0, sw = screen.width || 0, sh = screen.height || 0
   var spots = [
     { x: (sw - cardWidth) / 2, y: topOffset },
     { x: (sw - cardWidth) / 2, y: sh - cardHeight - margin },
-    { x: margin, y: (sh - cardHeight) / 2 },
-    { x: sw - cardWidth - margin, y: (sh - cardHeight) / 2 },
   ]
-  var r = regionOf(state)
+  var r = phaseOf(state) === "recording" ? regionOf(state) : null
   for (var i = 0; i < spots.length; i++) {
     var c = spots[i]
     if (!r) return c

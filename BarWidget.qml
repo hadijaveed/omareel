@@ -315,13 +315,33 @@ Panel {
 
   // ---- bar button ---------------------------------------------------------
 
+  // Window/Screen recordings deliberately hide the floating controls because
+  // KMS would burn them into the video. Make their safe replacement in the
+  // reserved system bar impossible to miss, while keeping the compact icon
+  // when idle. Omarchy's bar wrapper already makes every module draggable.
+  Rectangle {
+    anchors.fill: parent
+    anchors.margins: Style.space(1)
+    visible: root.recording
+    radius: height / 2
+    color: Util.alpha(root.bar ? root.bar.urgent : Color.urgent, 0.88)
+    border.width: Math.max(1, Style.space(1))
+    border.color: root.bar ? root.bar.urgent : Color.urgent
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.recording ? "󰑊 " + root.elapsed : (root.busy ? "󰑊 …" : "󰑊")
+    text: root.recording ? "●  REC  " + root.elapsed + "  ·  STOP" : (root.busy ? "󰑊 …" : "󰑊")
+    fontSize: Style.font.body
+    horizontalMargin: root.recording ? 14 : 8.5
+    foreground: root.recording ? "#ffffff" : (root.bar ? root.bar.barForeground : Color.foreground)
+    useActiveColor: !root.recording
     active: root.recording
-    tooltipText: root.recording ? "Stop Omareel recording" : "Omareel: record & share"
+    tooltipText: root.recording
+      ? "Recording — click to stop · right-click to discard · drag to move"
+      : "Omareel: record & share"
     onPressed: function(b) {
       if (b === Qt.LeftButton) {
         if (root.recording) root.cliRun(["stop"])
@@ -568,7 +588,9 @@ Panel {
             Button {
               iconText: "󰖯"
               text: "Window"
-              tooltipText: "Pick an app; it stays captured even when covered (camera is composited in after Stop)"
+              tooltipText: Omareel.get(root.config, "windowCaptureMode", "region") === "portal"
+                ? "Portal capture: stays captured when covered, but can fail if the window resizes"
+                : "Reliable capture: pick a visible window and keep it in place during the recording"
               onClicked: root.start("window")
             }
             Button {
@@ -624,7 +646,9 @@ Panel {
               description: root.webcamOn
                 ? (Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
                    ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — end that call or tab, or the camera is skipped"
-                   : Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " · " + Omareel.get(root.config, "webcamSize", "medium"))
+                   : Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
+                     + " · " + Omareel.get(root.config, "webcamSize", "medium")
+                     + " · " + Omareel.get(root.config, "webcamPosition", Omareel.get(root.config, "webcamCorner", "bottom-right")))
                 : "Off — puts you in the corner of the video"
               checked: root.webcamOn
               onClicked: root.setConfig("webcam", !root.webcamOn)
@@ -664,7 +688,7 @@ Panel {
             Toggle {
               width: parent.width
               label: "Voice clean-up"
-              description: "Denoise, tone and levelling on the microphone; desktop audio untouched"
+              description: "Reduce room noise and preserve speech detail after Stop; system audio stays separate"
               checked: root.denoiseOn
               onClicked: root.setConfig("denoise", !root.denoiseOn)
             }
@@ -675,7 +699,8 @@ Panel {
               Dropdown {
                 width: (parent.width - Style.space(6)) / 2
                 options: [
-                  { value: "frame", label: "Frame (16:9, rounded)" },
+                  { value: "frame", label: "Landscape (16:9)" },
+                  { value: "classic", label: "Rectangle (4:3)" },
                   { value: "circle", label: "Circle" },
                   { value: "portrait", label: "Portrait (8:9)" }
                 ]
@@ -686,13 +711,33 @@ Panel {
                 width: (parent.width - Style.space(6)) / 2
                 options: [
                   { value: "bottom-right", label: "Bottom right" },
+                  { value: "bottom-center", label: "Bottom center" },
                   { value: "bottom-left", label: "Bottom left" },
+                  { value: "center-right", label: "Right center" },
+                  { value: "center-left", label: "Left center" },
                   { value: "top-right", label: "Top right" },
+                  { value: "top-center", label: "Top center" },
                   { value: "top-left", label: "Top left" }
                 ]
-                value: String(Omareel.get(root.config, "webcamCorner", "bottom-right"))
-                onChanged: function(v) { root.setConfig("webcamCorner", v) }
+                value: String(Omareel.get(root.config, "webcamPosition", Omareel.get(root.config, "webcamCorner", "bottom-right")))
+                onChanged: function(v) { root.setConfig("webcamPosition", v) }
               }
+            }
+            Dropdown {
+              visible: root.webcamOn
+              width: parent.width
+              label: "Camera crop"
+              options: [
+                { value: "full", label: "Full — widest view" },
+                { value: "close", label: "Close — 1.25×" },
+                { value: "tight", label: "Tight — 1.5×" }
+              ]
+              value: String(Omareel.get(root.config, "webcamZoom", "full"))
+              onChanged: function(v) { root.setConfig("webcamZoom", v) }
+            }
+            Hint {
+              visible: root.webcamOn
+              text: "Placement and crop are locked when recording starts, so the self-view and exported video stay matched."
             }
             Toggle {
               width: parent.width
@@ -953,6 +998,19 @@ Panel {
             checked: Omareel.get(root.config, "keepRaw", true) === true
             onClicked: root.setConfig("keepRaw", !(Omareel.get(root.config, "keepRaw", true) === true))
           }
+          Dropdown {
+            width: parent.width
+            label: "Window capture"
+            options: [
+              { value: "region", label: "Reliable — visible window region" },
+              { value: "portal", label: "Portal — occlusion-safe, resize-sensitive" }
+            ]
+            value: String(Omareel.get(root.config, "windowCaptureMode", "region"))
+            onChanged: function(v) { root.setConfig("windowCaptureMode", v) }
+          }
+          Hint {
+            text: "Reliable mode uses fixed dimensions so a browser resize cannot freeze the screen track."
+          }
           SettingField {
             label: "Recordings folder"
             path: "outputDir"
@@ -961,6 +1019,22 @@ Panel {
 
           // -- Noise removal --
           Heading { text: "Noise removal" }
+          Dropdown {
+            width: parent.width
+            label: "Recording input level"
+            options: [
+              { value: "60", label: "60% — sensitive microphone" },
+              { value: "70", label: "70%" },
+              { value: "80", label: "80% — recommended" },
+              { value: "90", label: "90%" },
+              { value: "100", label: "100% — quiet microphone" }
+            ]
+            value: String(Omareel.get(root.config, "micVolumePercent", 80))
+            onChanged: function(v) { root.setConfig("micVolumePercent", parseInt(v)) }
+          }
+          Hint {
+            text: "Reapplied when recording starts, so a browser call cannot leave the microphone too quiet."
+          }
           Dropdown {
             width: parent.width
             label: "Engine"
@@ -979,8 +1053,8 @@ Panel {
             label: "Strength"
             options: [
               { value: "light", label: "Natural — minimal processing" },
-              { value: "normal", label: "Clean — gentle noise removal" },
-              { value: "strong", label: "Strong — RNNoise for noisy rooms" }
+              { value: "normal", label: "Clean — balanced voice and noise reduction" },
+              { value: "strong", label: "Strong — more isolation, less natural tone" }
             ]
             value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
             onChanged: function(v) { root.setConfig("denoiseStrength", v) }
@@ -990,7 +1064,7 @@ Panel {
               + " · microphone only · 48 kHz mono"
               + (root.doctor.micVolumeLow === true
                   ? "\nInput is only " + String(root.doctor.micVolumePercent) + "% ("
-                    + String(root.doctor.micVolumeDb) + " dB). Raise the system microphone near 80%."
+                    + String(root.doctor.micVolumeDb) + " dB). Omareel will restore the selected recording level at Start."
                   : "")
               + (root.doctor.ladspa === false ? "\nFor the most reliable clean-up:  sudo pacman -S noise-suppression-for-voice" : "")
           }

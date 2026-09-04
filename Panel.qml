@@ -12,10 +12,11 @@ import "Omareel.js" as Omareel
 // processing and upload progress, then "Saved" with Upload (asks for a title)
 // / Open / Copy, and "link copied" once uploaded.
 //
-// Hidden for whole-screen recordings, where it would end up in the video.
-// For area recordings it picks a spot outside the region (top, bottom, left,
-// right) and hides when none fits. State comes from $XDG_RUNTIME_DIR/omareel/state.json,
-// written by bin/omareel.
+// Hidden for Window and whole-screen recordings, where KMS would put it in
+// the video. The movable Omareel widget in the system bar remains the live
+// timer/Stop control. For area recordings this card uses a safe top or bottom
+// strip and hides when neither fits. State comes from
+// $XDG_RUNTIME_DIR/omareel/state.json, written by bin/omareel.
 Item {
   id: root
 
@@ -39,9 +40,10 @@ Item {
   readonly property bool finished: phase === "done"
   readonly property bool canUpload: Omareel.canUpload(state)
   readonly property bool wholeScreen: state && String(state.targetKind || "") === "screen"
+  readonly property bool directWindow: state && String(state.targetKind || "") === "window-direct"
 
   readonly property bool showControls: !dismissed
-    && ((recording && !wholeScreen) || busy || finished)
+    && ((recording && !wholeScreen && !directWindow) || busy || finished)
 
   // Shell routing contract (summon / hide / toggle).
   readonly property bool opened: showControls

@@ -10,7 +10,8 @@ video whether it stays local or goes up as a shareable link, with a title.
   <img src="docs/settings.png" width="360" alt="Omareel settings: frame rate, quality, codec, noise removal engine, sharing destination">
 </p>
 
-While recording, a small floating bar sits at the top of the screen:
+While recording an area, a small floating bar sits in a safe strip at the top
+or bottom of the screen:
 
 <p align="center">
   <img src="docs/recording-bar.png" width="430" alt="● 00:03 · Area 1600x900  Stop  Discard">
@@ -27,19 +28,20 @@ upload it, or copy its link or path:
 
 ## What it does
 
-- **Record** an area (drag, or click a window to snap to it), a single window
-  (via the portal picker, so it stays captured even when covered), or the
-  focused monitor. GPU encoding through `gpu-screen-recorder`.
+- **Record** an area (drag, or click a window to snap to it), a single visible
+  window through reliable fixed-region capture, or the focused monitor. An
+  optional portal mode keeps covered windows captured but is resize-sensitive.
+  GPU encoding through `gpu-screen-recorder`.
 - **Camera frame** in any corner of the recording: a rounded 16:9 frame
   (the Loom look), a circle, or a portrait card, in four sizes, any camera.
   It works the same way in every mode, like a screen studio: the camera is
   recorded to its own file and a self-view floats in the corner where the
-  frame will be. Area and Screen captures include that self-view as-is;
-  a Window capture cannot see it, so the frame is drawn in after Stop.
+  frame will be. Area, Screen, and reliable Window captures include that
+  self-view as-is; a portal Window capture draws the frame in after Stop.
 - **Pick your microphone** and your system-audio source from dropdowns.
-- **Noise removal that keeps your voice.** RNNoise clean-up of the microphone
-  track after the recording, blended so the voice keeps its body, tone
-  corrected, then two-pass loudness normalisation to speech level.
+- **Voice clean-up.** RNNoise reduces noise, with a small, time-aligned
+  natural component to preserve speech detail. Neutral EQ and two-pass
+  loudness normalisation keep the result consistent.
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.
 - **Share only what you choose.** After Stop the banner offers **Upload**;
@@ -129,6 +131,15 @@ video that is already shared re-uploads its player page with the new title.
 The same from a terminal: `omareel upload last --title="…"`,
 `omareel rename <file.mp4> "…"`, `omareel copy <file.mp4>`.
 
+**Window/Screen controls:** the Omareel timer in the system bar is the Stop
+control, shown as a red **REC · STOP** pill so no floating controls are burned
+into the video. Click it to stop or right-click to discard. Drag the pill to
+move the Omareel widget anywhere along the bar; the whole bar can be configured
+at the top or bottom.
+Screen mode captures the monitor's usable rectangle, excluding its reserved
+system bar. Other windows or notifications inside the selected region are
+visible in KMS recordings; keep the intended content in place.
+
 **Keyboard:** `omareel toggle` opens the launcher when idle and stops the
 recording when one is running.
 
@@ -157,36 +168,90 @@ Credentials are stored by `omareel remote save` in
 `~/.config/omarchy/omareel.json` holds only the non-secret settings, which
 makes it safe to keep in a dotfiles repo.
 
+## Camera layouts
+
+Camera layout is built from four independent controls, available in the
+launcher whenever Camera is on:
+
+- **Position:** all four corners, top/bottom center, and left/right center.
+- **Frame:** Landscape 16:9, Rectangle 4:3, Portrait 8:9, or Circle.
+- **Crop:** Full, Close (1.25×), or Tight (1.5×). Crops remain centered and
+  never stretch the camera image.
+- **Size:** Small, Medium, Large, or Extra large.
+
+Useful starting points are Circle + Medium + Close at bottom-right for product
+demos, Rectangle + Large + Close at right-center for a presenter layout, and
+Portrait + Medium + Tight at left-center when the UI needs the right side.
+Every layout stays inside a 3 % safe margin. Omareel snapshots the selection
+when recording begins and uses the same size, crop, mask, and position math for
+the live self-view and Window-mode export.
+
 ## Noise removal
 
 Microphone and desktop audio are captured as separate tracks. Only the
 microphone goes through the speech chain: convert to 48 kHz mono → apply a
-configurable pre-gain → cut rumble below 70 Hz → denoise → subtle warmth EQ →
+configurable pre-gain → cut rumble below 70 Hz → denoise → neutral tone →
 light compression → two-pass `loudnorm` to −16 LUFS → a −1.5 dB true-peak
 safety limiter. Desktop audio is mixed back afterwards at 50 %, so denoising
 never damages music or application sound.
 
-**Strength** controls the whole cleanup profile: *Natural* uses minimal
-processing, *Clean* applies gentle FFT noise reduction and is the default, and
-*Strong* uses RNNoise for difficult rooms. LADSPA stays fully wet because its
-retroactive VAD adds latency; blending an immediate dry path with it would
-create an audible doubled voice. The default RNNoise VAD threshold is 50 %,
-with 300 ms tail grace and 50 ms retroactive grace to keep word endings and
-beginnings intact.
+Omareel also reapplies the configured microphone source level (80% by default)
+when each recording starts. Browser calls can otherwise leave USB microphones
+at a much quieter system level, making the final loudness pass raise the room
+noise along with the voice.
 
-The engine setting `auto` selects the transparent `afftdn` cleanup for Natural
-and Clean, and RNNoise LADSPA for Strong when the plugin is installed. An
-explicit engine selection overrides that behavior:
+**Strength** controls the whole cleanup profile: *Natural* uses minimal FFT
+processing, while *Clean* (the default) and *Strong* use RNNoise voice
+isolation. Clean combines 85% denoised speech with 15% time-aligned original
+speech. A soft gate, guided by the cleaned voice, reduces that natural
+component during pauses so it does not restore room noise. Strong uses the
+fully denoised signal and firmer levelling, at the cost of more altered tone.
+No preset adds bass or cuts the presence band by default.
+Very quiet takes have make-up gain capped at 18 dB, so a mostly silent take
+does not amplify faint room noise up to speech level.
+
+Omareel measures the installed LADSPA model's delay, feeds it in 10 ms blocks,
+flushes the tail, and removes the measured delay before mixing. The installed
+1.21 model adds 20 ms on top of VAD look-ahead; its internal Dry Mix does not
+account for that model delay. Omareel therefore leaves internal Dry Mix at
+zero and aligns the paths itself. Failed latency calibration triggers the
+fallback engine rather than an unaligned mix. The default VAD threshold is
+50%, with 300 ms tail grace and 50 ms retroactive grace.
+
+The engine setting `auto` selects transparent `afftdn` cleanup for Natural and
+RNNoise LADSPA for Clean and Strong when the plugin is installed. If LADSPA is
+unavailable, it tries the downloaded RNNoise model before falling back to FFT
+cleanup. An explicit engine selection overrides that behavior:
 
 1. **RNNoise LADSPA plugin** from the `noise-suppression-for-voice` package.
    Aggressive suppression for a difficult room.
 2. **ffmpeg `arnndn`** with the models `omareel setup` downloads. ffmpeg
    9.0.1's `arnndn` intermittently emits NaN samples, which makes the AAC
    encoder abort, so Omareel retries it a few times before falling back.
-3. **ffmpeg `afftdn`**, a plain FFT denoiser.
+3. **ffmpeg `afftdn`**, a plain FFT denoiser. The Clean and Strong profiles
+   follow it with a soft downward expander: room tone stays down between words
+   even after loudness levelling, without a hard gate clipping syllables.
 
 The raw take is kept as `<id>.raw.mp4` (toggle in settings), so a bad clean-up
 can always be redone with `omareel finalize <raw.mp4>`.
+Turning Voice clean-up off also bypasses tone, compression, and loudness
+normalisation; only the short capture-pop mute and audio encoding remain.
+
+Saved actions stay available until Close or the next recording. Recording,
+processing, and sharing commands are serialized; a duplicate click cannot
+start a second picker or finalize the same file twice. Settings writes are
+also serialized so rapidly changing multiple options preserves each change.
+
+### Regression checks
+
+Run `python3 tests/audio-regression.py` for local DSP tests (FFmpeg and the
+RNNoise LADSPA plugin required), `python3 tests/workflow-regression.py` for
+isolated workflow tests, and `node tests/helpers.js` for card placement and
+configuration helpers. Fixtures are synthetic and uploads are mocked; tests
+never upload a real recording. DSP checks cover timing at multiple look-ahead
+settings, the final partial frame, silence, cleanup Off, and untouched desktop
+audio. A listening check on your own microphone remains necessary to choose
+between Natural, Clean, and Strong.
 
 ## CLI
 
@@ -222,17 +287,20 @@ omareel start area --region=1280x720+200+200 --no-upload; sleep 4; omareel stop
   "fps": 30,                  // 30 | 60
   "codec": "h264",            // h264 (plays everywhere) | hevc | av1
   "quality": "very_high",     // medium | high | very_high | ultra
+  "windowCaptureMode": "region", // region (reliable) | portal (occlusion-safe)
   "mic": true,          "micDevice": "default",
+  "micVolumePercent": 80,   // restored at the start of every take
   "desktopAudio": false, "desktopDevice": "default",
   "webcam": false,       "webcamDevice": "auto",
   "webcamSize": "medium",     // small | medium | large | xlarge (16/22/30/40 % of the recording height)
-  "webcamShape": "frame",     // frame (16:9, rounded) | circle | portrait (8:9 card)
-  "webcamCorner": "bottom-right", // bottom-left | top-right | top-left
+  "webcamShape": "frame",     // frame (16:9) | classic (4:3) | portrait (8:9) | circle
+  "webcamPosition": "bottom-right", // 4 corners | top/bottom-center | center-left/right
+  "webcamZoom": "full",       // full | close (1.25x) | tight (1.5x)
   "denoise": true,
   "denoiseEngine": "auto",    // auto | ladspa | arnndn | afftdn | off
   "denoiseModel": "bd",       // arnndn model: bd (general) | sh (speech)
   "denoiseStrength": "normal", // light/natural | normal/clean | strong
-  "micGainDb": 0,             // optional pre-gain; first set the system mic near 80 %
+  "micGainDb": 0,             // optional processing pre-gain after capture
   "vadThreshold": 50,         // LADSPA voice gate, %
   "vadGraceMs": 300,          // keep word and sentence endings
   "vadRetroactiveMs": 50,     // recover beginnings; adds this much denoiser latency
@@ -256,13 +324,13 @@ launcher / keybind / menu
         │
         ▼
 bin/omareel start …          gpu-screen-recorder (VAAPI/NVENC); ffmpeg records the camera to
-                             <id>.cam.mp4 and tees it to an mpv self-view (masked, hidden from window capture)
+                             <id>.cam.mp4 and tees it to an mpv self-view
         │  state.json: picking → recording        ← Panel.qml shows the floating bar
         ▼
 bin/omareel stop
-        ├─ ffmpeg: mic → highpass → RNNoise → voice EQ/compression
+        ├─ ffmpeg: mic → highpass → selected denoiser → voice EQ/compression
         │          desktop audio → mix after cleanup → 2-pass loudnorm/limiter → +faststart
-        │          + camera frame overlay (shape/corner/size) for Window recordings
+        │          + camera overlay for optional portal Window recordings
         ├─ thumbnail, index.jsonl  (<uuid>.mp4 until renamed)
         ├─ wl-copy path, notification
         │  state.json: processing → done (banner: Upload / Open / Copy)
@@ -279,20 +347,21 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
 
 ## Known limits
 
-- The floating controls are part of the screen, so whole-screen recordings
-  hide them (the bar button timer and the keybinding still stop the
-  recording). Area recordings put them at whichever edge is outside the
-  region (top, bottom, left, right) and hide them when none is.
+- Floating controls are part of the screen, so Window and whole-screen
+  recordings hide them; the movable system-bar timer and the keybinding still
+  stop the recording. Area recordings use a safe top or bottom strip and hide
+  the card when neither is outside the selected region.
 - **A camera can only stream to one program at a time.** If Chromium,
   Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
   was granted the camera), the camera cannot start. Omareel says so in the
   launcher ("In use by Chromium") and in a notification, and records without
   the camera. End the call or close that tab, then record again.
-- Window recordings with the camera on are re-encoded once to composite the
-  camera frame, so they take a few extra seconds to finish. The camera take is kept
-  as `<id>.cam.mp4` next to the raw file while *Keep raw* is on.
-- Window mode uses the xdg-desktop-portal picker. If it fails on your GPU,
-  use Area and click the window: the picker snaps to it.
+- Reliable Window mode records a fixed on-screen rectangle. Keep the selected
+  window visible and in place during the take; covered pixels are recorded as
+  covered. This avoids portal freezes caused by dynamic window resizing.
+- Optional portal Window mode remains available in settings for occlusion-safe
+  capture. Portal recordings with a camera are re-encoded once to composite
+  the camera frame and may fail if the portal renegotiates its dimensions.
 - No pause/resume yet.
 
 ## Developing
