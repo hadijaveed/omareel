@@ -37,8 +37,10 @@ function statusText(state, nowSec) {
   var phase = phaseOf(state)
   switch (phase) {
   case "picking": return "Pick what to record…"
+  case "starting": return "Starting camera and screen capture…"
+  case "error": return String(state.error || "Recording could not start. Check Setup in Settings.")
   case "recording": return formatElapsed(state, nowSec) + (state.target ? "  ·  " + state.target : "")
-  case "processing": return "Cleaning up audio…"
+  case "processing": return "Preparing your video…"
   case "uploading": return "Uploading" + (state.progress ? "  " + state.progress + "%" : "…")
   case "done":
     if (state.url) return "Link copied to clipboard"
@@ -140,7 +142,7 @@ function deviceLabel(list, value) {
   for (var i = 0; i < list.length; i++) {
     if (String(list[i].value) === String(value)) return String(list[i].label)
   }
-  return String(value || "")
+  return "Unavailable — choose another device"
 }
 
 // Who holds the selected camera open ("" when free). "auto" = first real camera.
@@ -229,8 +231,10 @@ function canUpload(state) {
 }
 
 function uploadReady(config, remoteStatus) {
-  var p = get(config, "upload.provider", "none")
-  if (p === "none") return false
-  if (p === "existing") return String(get(config, "upload.remote", "")) !== ""
-  return String(get(config, "upload.bucket", "")) !== "" && !!(remoteStatus && remoteStatus.hasSecret)
+  if (!remoteStatus || remoteStatus.ready !== true) return false
+  // Ignore readiness from before an optimistic edit / asynchronous status refresh.
+  var fields = ["provider", "accountId", "region", "endpoint", "bucket", "prefix", "remote", "publicBase"]
+  return fields.every(function(key) {
+    return String(get(config, "upload." + key, "")) === String(get(remoteStatus, "config." + key, ""))
+  })
 }

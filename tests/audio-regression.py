@@ -77,6 +77,23 @@ class AudioRegression(unittest.TestCase):
         self.assertEqual(len(samples), 96000)
         self.assertEqual(max(abs(x) for x in samples), 0)
 
+    def test_mastering_outputs_contiguous_sample_timestamps(self):
+        master = self.helper('master_audio_filter anull').stdout.strip()
+        # Simulate a filter introducing a timestamp jump without losing samples.
+        result = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+            'sine=frequency=440:sample_rate=48000:duration=1', '-af',
+            'asetpts=PTS+if(gte(T\\,0.5)\\,0.077/TB\\,0),' + master,
+            '-c:a', 'pcm_s16le', '-f', 'framecrc', '-'],
+            capture_output=True, text=True, check=True, timeout=10)
+        expected = 0
+        for line in result.stdout.splitlines():
+            if line.startswith('#'):
+                continue
+            fields = [part.strip() for part in line.split(',')]
+            self.assertEqual(int(fields[2]), expected)
+            expected += int(fields[3])
+        self.assertEqual(expected, 48000)
+
     def test_cleanup_off_preserves_input_after_startup_mute(self):
         samples = self.render("0.1*sin(2*PI*1000*t)", self.graph("none"))
         error = max(abs(samples[i] - 0.1 * math.sin(2 * math.pi * 1000 * i / 48000))

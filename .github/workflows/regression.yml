@@ -1,0 +1,50 @@
+name: Regression checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  upload-and-workflow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg jq curl unzip openssl nodejs cmake ninja-build g++
+      - name: Build pinned RNNoise LADSPA (same release as Omarchy)
+        working-directory: /tmp
+        run: |
+          git clone --quiet https://github.com/werman/noise-suppression-for-voice.git rnnoise
+          git -C rnnoise checkout --detach 4b0a6f76fc8bcfb5a3603ae2cb6619dfcb0e19f2
+          cmake -S rnnoise -B rnnoise-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_VST_PLUGIN=OFF -DBUILD_VST3_PLUGIN=OFF -DBUILD_LV2_PLUGIN=OFF -DBUILD_AU_PLUGIN=OFF -DBUILD_AUV3_PLUGIN=OFF -DBUILD_LADSPA_PLUGIN=ON
+          cmake --build rnnoise-build --parallel 2
+          sudo install -D -m 755 rnnoise-build/bin/ladspa/librnnoise_ladspa.so /usr/lib/ladspa/librnnoise_ladspa.so
+      - name: Install pinned rclone
+        working-directory: /tmp
+        run: |
+          curl --fail --location --retry 3 --output rclone-v1.75.0-linux-amd64.zip https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip
+          echo "aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa  rclone-v1.75.0-linux-amd64.zip" | sha256sum --check
+          unzip -q rclone-v1.75.0-linux-amd64.zip
+          sudo install -m 755 rclone-v1.75.0-linux-amd64/rclone /usr/local/bin/rclone
+      - name: Check shell and helpers
+        run: |
+          bash -n bin/omareel
+          node tests/helpers.js
+      - name: Test providers and HTTPS S3 integration
+        run: python3 tests/upload-regression.py
+      - name: Test recording workflow
+        run: python3 tests/workflow-regression.py
+      - name: Test fresh setup and camera negotiation
+        run: python3 tests/setup-regression.py
+      - name: Test audio (fail instead of skipping when RNNoise is missing)
+        run: |
+          test -f /usr/lib/ladspa/librnnoise_ladspa.so
+          python3 tests/audio-regression.py

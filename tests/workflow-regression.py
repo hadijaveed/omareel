@@ -19,7 +19,10 @@ class WorkflowRegression(unittest.TestCase):
         self.config = self.root / "config.json"
         self.config.write_text(json.dumps({"outputDir": str(self.root), "mic": False,
                                           "webcamPosition": "top-right"}))
-        self.env = dict(os.environ, OMAREEL_CONFIG=str(self.config), XDG_RUNTIME_DIR=self.tmp.name)
+        rclone_conf = self.root / "rclone.conf"
+        rclone_conf.write_text("[fixture]\ntype = s3\n")
+        self.env = dict(os.environ, OMAREEL_CONFIG=str(self.config), XDG_RUNTIME_DIR=self.tmp.name,
+                        RCLONE_CONFIG=str(rclone_conf))
         self.runtime = self.root / "omareel"
         self.runtime.mkdir()
         self.env.pop("OMAREEL_OPERATION_LOCKED", None)

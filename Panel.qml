@@ -24,13 +24,14 @@ Item {
   property var manifest: null
   property string omarchyPath: ""
 
-  readonly property string cli: String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, "")
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, ""))
   readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omareel"
 
   property var state: ({ phase: "idle" })
   property int nowSec: Math.floor(Date.now() / 1000)
   property bool dismissed: false
   property bool titling: false      // Upload/Rename pressed → title field shown
+  property bool confirmDiscard: false
   property string titleAction: "upload" // upload | rename
   property var targetScreen: null
 
@@ -69,6 +70,7 @@ Item {
   }
 
   onPhaseChanged: {
+    confirmDiscard = false
     if (phase === "picking" || phase === "recording") {
       dismissed = false
       var focused = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
@@ -235,7 +237,7 @@ Item {
           visible: root.recording
           iconText: "󰓛"
           text: "Stop"
-          tooltipText: "Stop, clean up, and share"
+          tooltipText: "Stop and save the video; upload is optional"
           active: true
           onClicked: root.cliRun(["stop"])
         }
@@ -243,8 +245,12 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           visible: root.recording
           iconText: "󰆴"
-          tooltipText: "Discard recording"
-          onClicked: root.cliRun(["cancel"])
+          text: root.confirmDiscard ? "Confirm" : ""
+          tooltipText: root.confirmDiscard ? "Click again to permanently discard this recording" : "Discard recording"
+          onClicked: {
+            if (root.confirmDiscard) root.cliRun(["cancel"])
+            else root.confirmDiscard = true
+          }
         }
 
         Button {

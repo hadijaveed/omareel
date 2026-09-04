@@ -21,7 +21,7 @@ Panel {
   ipcTarget: "omareel"
   manageIpc: false
 
-  readonly property string cli: String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, "")
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, ""))
   readonly property string home: Quickshell.env("HOME")
   readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omareel"
 
@@ -39,14 +39,16 @@ Panel {
   property bool editing: false      // a text field has focus → shortcuts off
   property string message: ""       // save/test feedback on the settings page
   property bool working: false
+  property bool confirmDiscard: false
   property string draftKey: ""
   property string draftSecret: ""
 
   readonly property string phase: Omareel.phaseOf(state)
   readonly property bool recording: phase === "recording"
-  readonly property bool busy: phase === "picking" || phase === "processing" || phase === "uploading"
+  readonly property bool busy: startProc.running || phase === "picking" || phase === "starting" || phase === "processing" || phase === "uploading"
   readonly property bool finished: phase === "done"
-  readonly property bool idle: phase === "idle"
+  readonly property bool idle: phase === "idle" || phase === "error"
+  onPhaseChanged: confirmDiscard = false
   readonly property string elapsed: Omareel.formatElapsed(state, nowSec)
 
   readonly property bool micOn: Omareel.get(config, "mic", true) === true
@@ -67,8 +69,10 @@ Panel {
   function cliRun(args) { Util.execArgv([root.cli].concat(args)) }
 
   function start(kind) {
+    if (root.busy || root.recording) return
     root.close()
-    cliRun(["start", kind])
+    startProc.command = [root.cli, "start", kind]
+    startProc.running = true
   }
 
   // Optimistic local update + persisted deep-merge through the CLI.
@@ -125,7 +129,7 @@ Panel {
     if ((root.provider === "s3" || root.provider === "b2") && !Omareel.get(root.config, "upload.region", "")) need.push("Region")
     if (root.provider === "s3compat" && !Omareel.get(root.config, "upload.endpoint", "")) need.push("Endpoint URL")
     if (!Omareel.get(root.config, "upload.bucket", "")) need.push("Bucket")
-    if (!root.remoteStatus.hasSecret) {
+    if (!root.remoteStatus.hasSecret || root.draftKey || root.draftSecret) {
       if (!root.draftKey) need.push(root.provider === "b2" ? "Key ID" : "Access key ID")
       if (!root.draftSecret) need.push(root.provider === "b2" ? "Application key" : "Secret access key")
     }
@@ -149,13 +153,9 @@ Panel {
   }
 
   function testRemote() {
-    if (root.provider !== "existing" && !root.remoteStatus.hasSecret) {
-      var need = missingForSave()
-      root.message = "Save credentials first" + (need.length ? " — fill in: " + need.join(", ") : "")
-      return
-    }
-    if (!Omareel.get(root.config, "upload.publicBase", "") && root.provider !== "existing") {
-      root.message = "Enter the bucket's public URL first, so the test can fetch the probe back"
+    if (!root.uploadReady) {
+      root.message = root.remoteStatus.message || "Finish the destination settings and save credentials first"
+      remoteProc.running = true
       return
     }
     root.message = "Testing… uploading a probe file"
@@ -163,7 +163,13 @@ Panel {
     testProc.running = true
   }
 
-  onOpenedChanged: if (opened) { root.editing = false; refreshAll() }
+  onOpenedChanged: if (opened) {
+    root.editing = false
+    root.confirmDiscard = false
+    refreshAll()
+    Qt.callLater(function() { contentViewport.contentY = 0 })
+  }
+  onPageChanged: Qt.callLater(function() { contentViewport.contentY = 0 })
 
   // ---- state / config plumbing -------------------------------------------
 
@@ -207,11 +213,14 @@ Panel {
 
   FileView {
     id: configFile
-    path: root.home + "/.config/omarchy/omareel.json"
+    path: Quickshell.env("OMAREEL_CONFIG") || root.home + "/.config/omarchy/omareel.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.config = Omareel.parseJson(text(), {})
+    onLoaded: {
+      root.config = Omareel.parseJson(text(), {})
+      remoteRefresh.restart()
+    }
     onLoadFailed: root.config = {}
   }
 
@@ -230,6 +239,16 @@ Panel {
     id: mergeComponent
     Process {
       onExited: function() { configFile.reload(); destroy() }
+    }
+  }
+
+  Timer {
+    id: remoteRefresh
+    interval: 150
+    onTriggered: {
+      if (remoteProc.running) restart()
+      else remoteProc.running = true
+      if (!doctorProc.running) doctorProc.running = true
     }
   }
 
@@ -258,6 +277,22 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.doctor = Omareel.parseJson(text, {})
     }
+    onExited: function(code) {
+      if (code !== 0) root.doctor = { ready: false, errors: ["Setup check could not run. Install the README requirements and check the settings file."], warnings: [] }
+    }
+  }
+
+  Process {
+    id: startProc
+    stderr: StdioCollector { id: startErr; waitForEnd: true }
+    onExited: function(code) {
+      stateFile.reload()
+      if (code !== 0 && code !== 75) {
+        root.message = String(startErr.text || "").trim()
+        root.page = "launcher"
+        root.open()
+      }
+    }
   }
 
   Process {
@@ -282,14 +317,20 @@ Panel {
     onExited: function(code) {
       root.working = false
       var out = String(testOut.text || "").trim(), err = String(testErr.text || "").trim()
-      root.message = (code === 0 ? "" : "Test failed\n") + (out || err || "exit " + code)
+      root.message = (code === 0 ? "" : "Test failed\n") + ([out, err].filter(function(v) { return v !== "" }).join("\n") || "exit " + code)
     }
   }
 
   Process {
     id: linkProc
     command: [root.cli, "setup", "--link"]
-    onExited: function() { root.message = "Linked ~/.local/bin/omareel"; doctorProc.running = true }
+    stdout: StdioCollector { id: setupOut; waitForEnd: true }
+    stderr: StdioCollector { id: setupErr; waitForEnd: true }
+    onExited: function(code) {
+      root.message = (code === 0 ? "Setup complete\n" : "Setup incomplete\n")
+        + [String(setupOut.text || "").trim(), String(setupErr.text || "").trim()].filter(function(v) { return v !== "" }).join("\n")
+      doctorProc.running = true
+    }
   }
 
   Timer {
@@ -340,14 +381,14 @@ Panel {
     useActiveColor: !root.recording
     active: root.recording
     tooltipText: root.recording
-      ? "Recording — click to stop · right-click to discard · drag to move"
+      ? "Recording — click to stop · right-click for controls · drag to move"
       : "Omareel: record & share"
     onPressed: function(b) {
       if (b === Qt.LeftButton) {
         if (root.recording) root.cliRun(["stop"])
         else { root.page = "launcher"; root.toggle() }
       } else if (b === Qt.RightButton) {
-        if (root.recording) root.cliRun(["cancel"])
+        if (root.recording) root.open()
         else root.cliRun(["last"])
       } else if (b === Qt.MiddleButton) {
         root.cliRun(["open"])
@@ -428,6 +469,7 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Flickable {
+        id: contentViewport
         anchors.fill: parent
         clip: true
         contentWidth: width
@@ -493,14 +535,17 @@ Panel {
             spacing: Style.space(8)
             Button {
               iconText: "󰓛"
-              text: "Stop & share"
+              text: "Stop & save"
               active: true
               onClicked: { root.close(); root.cliRun(["stop"]) }
             }
             Button {
               iconText: "󰆴"
-              text: "Discard"
-              onClicked: { root.close(); root.cliRun(["cancel"]) }
+              text: root.confirmDiscard ? "Confirm discard" : "Discard"
+              onClicked: {
+                if (root.confirmDiscard) { root.close(); root.cliRun(["cancel"]) }
+                else root.confirmDiscard = true
+              }
             }
           }
 
@@ -510,11 +555,36 @@ Panel {
             text: Omareel.statusText(root.state, root.nowSec)
           }
 
+          // Readiness is guidance, not a claim that this laptop is certified.
+          Column {
+            visible: root.idle || root.finished
+            width: parent.width
+            spacing: Style.space(6)
+            Heading { text: root.phase === "error" ? "Recording did not start" : root.doctor.ready === true ? "Ready to record" : "Check your setup" }
+            Hint {
+              opacity: 1
+              text: root.phase === "error" ? Omareel.statusText(root.state, root.nowSec)
+                : root.doctor.ready === true ? "Choose a source below. Start with a short test to check picture and sound."
+                  + ((root.doctor.warnings || []).length ? "\n" + root.doctor.warnings.join("\n") : "")
+                : doctorProc.running ? "Checking recording tools and devices…"
+                : (root.doctor.errors || ["Open Settings to check this laptop before your first recording."]).join("\n")
+            }
+            Flow {
+              width: parent.width
+              spacing: Style.space(6)
+              visible: root.phase === "error" || root.doctor.ready !== true
+              Button { text: "Check again"; enabled: !doctorProc.running; onClicked: root.refreshAll() }
+              Button { text: "Setup & details"; onClicked: { root.message = ""; root.page = "settings" } }
+              Button { visible: root.phase === "error"; text: "Dismiss"; onClicked: root.cliRun(["dismiss"]) }
+            }
+          }
+
           // Last recording: local file (Upload / Open / Copy) or its link.
           Column {
             visible: root.finished
             width: parent.width
             spacing: Style.space(6)
+            Hint { visible: String(root.state.warning || "") !== ""; opacity: 1; text: String(root.state.warning || "") }
             Hint { text: Omareel.shortShare(root.state, 48); elide: Text.ElideMiddle; wrapMode: Text.NoWrap }
             Row {
               width: parent.width
@@ -645,7 +715,7 @@ Panel {
               label: "Camera"
               description: root.webcamOn
                 ? (Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
-                   ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — end that call or tab, or the camera is skipped"
+                   ? "Held by " + Omareel.cameraBusy(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto")) + " — close it before recording"
                    : Omareel.deviceLabel(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
                      + " · " + Omareel.get(root.config, "webcamSize", "medium")
                      + " · " + Omareel.get(root.config, "webcamPosition", Omareel.get(root.config, "webcamCorner", "bottom-right")))
@@ -677,20 +747,6 @@ Panel {
                 value: String(Omareel.get(root.config, "webcamSize", "medium"))
                 onChanged: function(v) { root.setConfig("webcamSize", v) }
               }
-            }
-          }
-
-          // Options
-          Heading { visible: root.idle || root.finished; text: "Options" }
-          Column {
-            visible: root.idle || root.finished
-            width: parent.width
-            Toggle {
-              width: parent.width
-              label: "Voice clean-up"
-              description: "Reduce room noise and preserve speech detail after Stop; system audio stays separate"
-              checked: root.denoiseOn
-              onClicked: root.setConfig("denoise", !root.denoiseOn)
             }
             Row {
               visible: root.webcamOn
@@ -738,6 +794,32 @@ Panel {
             Hint {
               visible: root.webcamOn
               text: "Placement and crop are locked when recording starts, so the self-view and exported video stay matched."
+            }
+          }
+
+          Heading { visible: root.idle || root.finished; text: "Sound & sharing" }
+          Column {
+            visible: root.idle || root.finished
+            width: parent.width
+            spacing: Style.space(4)
+            Toggle {
+              width: parent.width
+              label: "Voice clean-up"
+              description: "Reduce background noise after Stop. Stronger cleanup can change the sound of your voice."
+              checked: root.denoiseOn
+              onClicked: root.setConfig("denoise", !root.denoiseOn)
+            }
+            Dropdown {
+              visible: root.denoiseOn && root.micOn
+              width: parent.width
+              label: "Voice sound"
+              options: [
+                { value: "light", label: "Natural — gentle cleanup" },
+                { value: "normal", label: "Clean — balanced" },
+                { value: "strong", label: "Strong — noisy rooms" }
+              ]
+              value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
+              onChanged: function(v) { root.setConfig("denoiseStrength", v) }
             }
             Toggle {
               width: parent.width
@@ -1019,13 +1101,21 @@ Panel {
 
           // -- Noise removal --
           Heading { text: "Noise removal" }
+          Toggle {
+            width: parent.width
+            label: "Set microphone volume when recording"
+            description: "Off preserves your system level. Does not unmute the microphone."
+            checked: Omareel.get(root.config, "manageMicVolume", false) === true
+            onClicked: root.setConfig("manageMicVolume", !(Omareel.get(root.config, "manageMicVolume", false) === true))
+          }
           Dropdown {
+            visible: Omareel.get(root.config, "manageMicVolume", false) === true
             width: parent.width
             label: "Recording input level"
             options: [
               { value: "60", label: "60% — sensitive microphone" },
               { value: "70", label: "70%" },
-              { value: "80", label: "80% — recommended" },
+              { value: "80", label: "80%" },
               { value: "90", label: "90%" },
               { value: "100", label: "100% — quiet microphone" }
             ]
@@ -1033,7 +1123,7 @@ Panel {
             onChanged: function(v) { root.setConfig("micVolumePercent", parseInt(v)) }
           }
           Hint {
-            text: "Reapplied when recording starts, so a browser call cannot leave the microphone too quiet."
+            text: "Use system audio settings to choose a comfortable level. Different microphones need different gain."
           }
           Dropdown {
             width: parent.width
@@ -1062,10 +1152,8 @@ Panel {
           Hint {
             text: "Active: " + String(root.doctor.engine || "…")
               + " · microphone only · 48 kHz mono"
-              + (root.doctor.micVolumeLow === true
-                  ? "\nInput is only " + String(root.doctor.micVolumePercent) + "% ("
-                    + String(root.doctor.micVolumeDb) + " dB). Omareel will restore the selected recording level at Start."
-                  : "")
+              + (root.doctor.micVolumePercent !== null && root.doctor.micVolumePercent !== undefined
+                  ? "\nCurrent system input: " + String(root.doctor.micVolumePercent) + "%. Check a short sample before a full take." : "")
               + (root.doctor.ladspa === false ? "\nFor the most reliable clean-up:  sudo pacman -S noise-suppression-for-voice" : "")
           }
 
@@ -1089,8 +1177,8 @@ Panel {
             placeholder: "32 hex characters from the R2 overview page"
           }
           SettingField {
-            visible: root.provider === "s3" || root.provider === "b2"
-            label: root.provider === "b2" ? "Region — from the bucket's endpoint s3.<region>.backblazeb2.com" : "Region (e.g. us-east-1)"
+            visible: root.provider === "s3" || root.provider === "b2" || root.provider === "s3compat"
+            label: root.provider === "b2" ? "Region — from the bucket's endpoint s3.<region>.backblazeb2.com" : root.provider === "s3compat" ? "Region (if required by your S3 service)" : "Region (e.g. us-east-1)"
             path: "upload.region"
             placeholder: root.provider === "b2" ? "us-west-004" : "us-east-1"
           }
@@ -1135,7 +1223,7 @@ Panel {
           }
           SettingField {
             visible: root.provider !== "none"
-            label: root.provider === "existing" ? "Public URL of that path (blank → rclone link)" : "Public URL of the bucket"
+            label: root.provider === "existing" ? "Public URL of that path (optional)" : "Public URL of the bucket (optional; folder added automatically)"
             path: "upload.publicBase"
             placeholder: root.provider === "b2" ? "https://f004.backblazeb2.com/file/<bucket>" : "https://pub-xxxx.r2.dev  or  https://v.yourdomain.com"
           }
@@ -1143,7 +1231,7 @@ Panel {
             visible: root.provider !== "none"
             width: parent.width
             label: "Upload a player page"
-            description: "Share <id>.html with a poster and download link instead of the bare .mp4"
+            description: "Requires a public URL. Otherwise share the provider's video link."
             checked: Omareel.get(root.config, "upload.playerPage", true) === true
             onClicked: root.setConfig("upload.playerPage", !(Omareel.get(root.config, "upload.playerPage", true) === true))
           }
@@ -1155,7 +1243,7 @@ Panel {
               text: "Save credentials"
               visible: root.provider !== "existing"
               active: root.draftKey !== "" && root.draftSecret !== ""
-              onClicked: root.saveRemote()
+              onClicked: if (!root.working) root.saveRemote()
             }
             Button {
               iconText: "󰐊"
@@ -1170,20 +1258,25 @@ Panel {
           }
           Hint {
             visible: root.provider !== "none"
+            text: "Leave Public URL blank for provider-generated links (S3: up to 7 days). Test upload checks storage, share access and deletion using only a tiny probe."
+          }
+          Hint {
+            visible: root.provider !== "none"
             text: "Credentials are written to ~/.config/rclone/rclone.conf (mode 600) and never to omareel.json."
           }
 
           // -- Setup --
           Heading { text: "Setup" }
+          Hint { opacity: 1; text: (root.doctor.errors || []).concat(root.doctor.warnings || []).join("\n"); visible: text.length > 0 }
           Hint {
             text: (root.doctor.linked === true ? "CLI on PATH: ~/.local/bin/omareel"
                                                 : "Put the CLI on your PATH so keybindings can call it:")
           }
           Button {
-            visible: root.doctor.linked !== true
+            enabled: !linkProc.running && !root.busy && !root.recording
             iconText: "󰌷"
-            text: "Link omareel into ~/.local/bin"
-            onClicked: linkProc.running = true
+            text: linkProc.running ? "Checking setup…" : "Check setup & install voice models"
+            onClicked: { root.message = "Checking this laptop…"; linkProc.running = true }
           }
           Hint {
             text: "Suggested keybinding (~/.config/hypr/bindings.lua):\n"
