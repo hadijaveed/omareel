@@ -16,6 +16,10 @@ for (const phase of ['processing','uploading','done']) {
 assert.deepEqual(plain(ctx.cardPlacement({phase:'recording',region:'1800x1000+0+0'},screen,620,72,55,28)),{x:590,y:1200});
 assert.deepEqual(plain(ctx.regionOf({region:'1920x1080+-1920+0'})),{w:1920,h:1080,x:-1920,y:0});
 assert.equal(ctx.get({mic:false},'mic',true),false);
+assert.equal(ctx.deviceLabel([{value:'auto',label:'First available camera'}],'/dev/video99'),'Unavailable — choose another device');
+assert.deepEqual(plain(ctx.deviceOptions([{value:'auto',label:'First available camera'}],'/dev/video99')),
+  [{value:'/dev/video99',label:'Unavailable — choose a device'},{value:'auto',label:'First available camera'}]);
+assert.equal(ctx.deviceOptions([{value:'auto',label:'First available camera'}],'auto').length,1);
 assert.equal(ctx.statusText({phase:'starting'},0),'Starting camera and screen capture…');
 assert.equal(ctx.statusText({phase:'error',error:'Camera unavailable'},0),'Camera unavailable');
 assert.equal(ctx.statusText({phase:'processing'},0),'Preparing your video…');

@@ -145,6 +145,13 @@ function deviceLabel(list, value) {
   return "Unavailable — choose another device"
 }
 
+function deviceOptions(list, value) {
+  var choices = Array.isArray(list) ? list.slice() : []
+  if (value && !choices.some(function(item) { return String(item.value) === String(value) }))
+    choices.unshift({ value: String(value), label: "Unavailable — choose a device" })
+  return choices
+}
+
 // Who holds the selected camera open ("" when free). "auto" = first real camera.
 function cameraBusy(list, value) {
   if (!Array.isArray(list)) return ""

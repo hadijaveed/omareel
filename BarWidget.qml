@@ -689,7 +689,7 @@ Panel {
               visible: root.micOn
               width: parent.width
               showLabel: false
-              options: root.devices.mics
+              options: Omareel.deviceOptions(root.devices.mics, Omareel.get(root.config, "micDevice", "default"))
               value: String(Omareel.get(root.config, "micDevice", "default"))
               onChanged: function(v) { root.setConfig("micDevice", v) }
             }
@@ -705,7 +705,7 @@ Panel {
               visible: root.desktopOn
               width: parent.width
               showLabel: false
-              options: root.devices.outputs
+              options: Omareel.deviceOptions(root.devices.outputs, Omareel.get(root.config, "desktopDevice", "default"))
               value: String(Omareel.get(root.config, "desktopDevice", "default"))
               onChanged: function(v) { root.setConfig("desktopDevice", v) }
             }
@@ -730,7 +730,7 @@ Panel {
               Dropdown {
                 width: parent.width - sizeDrop.width - Style.space(6)
                 showLabel: false
-                options: root.devices.cameras
+                options: Omareel.deviceOptions(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
                 value: String(Omareel.get(root.config, "webcamDevice", "auto"))
                 onChanged: function(v) { root.setConfig("webcamDevice", v) }
               }
