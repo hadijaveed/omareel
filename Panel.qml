@@ -172,6 +172,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           visible: root.finished
           text: "󰄬"
@@ -181,6 +182,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           visible: !root.titling
           text: Omareel.statusText(root.state, root.nowSec)

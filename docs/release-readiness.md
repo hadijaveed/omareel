@@ -2,13 +2,15 @@
 
 ## Scope
 
-0.9.0 is an Omarchy 4 beta, not a promise of universal laptop compatibility.
+0.9.1 is an Omarchy 4 beta, not a promise of universal laptop compatibility.
 Default fixed-region/window privacy behavior is intentionally unchanged.
 Fresh-machine fixtures are automated; actual GPU, camera, permissions,
 suspend/resume, monitor docking, and a real cloud account still need testing
 on each supported hardware family before broad certification.
 
 ## Changes
+
+- Marketplace security follow-up (0.9.1): all owned QML text sinks explicitly use PlainText. Shared Hint covers process output and endpoint errors. Local native-style dropdown/toggle variants protect device/config labels, and the upload tooltip no longer interpolates a destination through an upstream AutoText sink. Qt regression verifies literal error rendering, zero protected-sink loopback image requests, and a working vulnerable positive control.
 
 - Startup timeout now fails with a persistent error instead of claiming to record an absent file. Partial media is retained for recovery.
 - Enabled devices and recording tools are checked before capture; setup also probes GPU information and available storage.

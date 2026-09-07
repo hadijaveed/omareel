@@ -410,6 +410,7 @@ Panel {
     width: parent.width
     spacing: Style.space(3)
     Text {
+      textFormat: Text.PlainText
       text: field.label
       color: Color.popups.text
       opacity: 0.7
@@ -436,6 +437,8 @@ Panel {
   }
 
   component Hint: Text {
+    // Process output, endpoint errors, paths and config are never markup.
+    textFormat: Text.PlainText
     width: parent.width
     color: Color.popups.text
     opacity: 0.65
@@ -493,6 +496,7 @@ Panel {
               id: headerRow
               spacing: Style.space(8)
               Text {
+                textFormat: Text.PlainText
                 text: "󰑊"
                 color: root.recording ? Color.urgent : Color.popups.text
                 font.family: Style.font.family
@@ -502,6 +506,7 @@ Panel {
               Column {
                 anchors.verticalCenter: parent.verticalCenter
                 Text {
+                  textFormat: Text.PlainText
                   text: "Omareel"
                   color: Color.popups.text
                   font.family: Style.font.family
@@ -509,6 +514,7 @@ Panel {
                   font.bold: true
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.idle ? "Record a video and share a link" : Omareel.statusText(root.state, root.nowSec)
                   color: Color.popups.text
                   opacity: 0.65
@@ -613,7 +619,7 @@ Panel {
                 iconText: "󰅧"
                 text: "Upload"
                 active: true
-                tooltipText: "Upload to " + Omareel.uploadSummary(root.config).replace(/^To /, "") + " and copy the link"
+                tooltipText: "Upload and copy the share link"
                 onClicked: root.uploadLast()
               }
               Button {
@@ -678,14 +684,14 @@ Panel {
             width: parent.width
             spacing: Style.space(4)
 
-            Toggle {
+            PlainToggle {
               width: parent.width
               label: "Microphone"
               description: root.micOn ? Omareel.deviceLabel(root.devices.mics, Omareel.get(root.config, "micDevice", "default")) : "Off"
               checked: root.micOn
               onClicked: root.setConfig("mic", !root.micOn)
             }
-            Dropdown {
+            PlainDropdown {
               visible: root.micOn
               width: parent.width
               showLabel: false
@@ -694,14 +700,14 @@ Panel {
               onChanged: function(v) { root.setConfig("micDevice", v) }
             }
 
-            Toggle {
+            PlainToggle {
               width: parent.width
               label: "System audio"
               description: root.desktopOn ? Omareel.deviceLabel(root.devices.outputs, Omareel.get(root.config, "desktopDevice", "default")) : "Off"
               checked: root.desktopOn
               onClicked: root.setConfig("desktopAudio", !root.desktopOn)
             }
-            Dropdown {
+            PlainDropdown {
               visible: root.desktopOn
               width: parent.width
               showLabel: false
@@ -710,7 +716,7 @@ Panel {
               onChanged: function(v) { root.setConfig("desktopDevice", v) }
             }
 
-            Toggle {
+            PlainToggle {
               width: parent.width
               label: "Camera"
               description: root.webcamOn
@@ -727,14 +733,14 @@ Panel {
               visible: root.webcamOn
               width: parent.width
               spacing: Style.space(6)
-              Dropdown {
+              PlainDropdown {
                 width: parent.width - sizeDrop.width - Style.space(6)
                 showLabel: false
                 options: Omareel.deviceOptions(root.devices.cameras, Omareel.get(root.config, "webcamDevice", "auto"))
                 value: String(Omareel.get(root.config, "webcamDevice", "auto"))
                 onChanged: function(v) { root.setConfig("webcamDevice", v) }
               }
-              Dropdown {
+              PlainDropdown {
                 id: sizeDrop
                 width: Style.space(110)
                 showLabel: false
@@ -752,7 +758,7 @@ Panel {
               visible: root.webcamOn
               width: parent.width
               spacing: Style.space(6)
-              Dropdown {
+              PlainDropdown {
                 width: (parent.width - Style.space(6)) / 2
                 options: [
                   { value: "frame", label: "Landscape (16:9)" },
@@ -763,7 +769,7 @@ Panel {
                 value: String(Omareel.get(root.config, "webcamShape", "frame"))
                 onChanged: function(v) { root.setConfig("webcamShape", v) }
               }
-              Dropdown {
+              PlainDropdown {
                 width: (parent.width - Style.space(6)) / 2
                 options: [
                   { value: "bottom-right", label: "Bottom right" },
@@ -779,7 +785,7 @@ Panel {
                 onChanged: function(v) { root.setConfig("webcamPosition", v) }
               }
             }
-            Dropdown {
+            PlainDropdown {
               visible: root.webcamOn
               width: parent.width
               label: "Camera crop"
@@ -802,14 +808,14 @@ Panel {
             visible: root.idle || root.finished
             width: parent.width
             spacing: Style.space(4)
-            Toggle {
+            PlainToggle {
               width: parent.width
               label: "Voice clean-up"
               description: "Reduce background noise after Stop. Stronger cleanup can change the sound of your voice."
               checked: root.denoiseOn
               onClicked: root.setConfig("denoise", !root.denoiseOn)
             }
-            Dropdown {
+            PlainDropdown {
               visible: root.denoiseOn && root.micOn
               width: parent.width
               label: "Voice sound"
@@ -821,7 +827,7 @@ Panel {
               value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
               onChanged: function(v) { root.setConfig("denoiseStrength", v) }
             }
-            Toggle {
+            PlainToggle {
               width: parent.width
               label: "Upload every recording"
               description: root.uploadReady
@@ -876,6 +882,7 @@ Panel {
               onClicked: { root.editing = false; root.page = "launcher" }
             }
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: "Recordings"
               color: Color.popups.text
@@ -923,6 +930,7 @@ Panel {
                   anchors.right: parent.right
                   anchors.margins: Style.space(8)
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: Omareel.recordingName(row.modelData)
                     color: Color.popups.text
@@ -931,6 +939,7 @@ Panel {
                     elide: Text.ElideMiddle
                   }
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: Omareel.recordingMeta(row.modelData)
                     color: row.shared ? Color.accent : Color.popups.text
@@ -1017,6 +1026,7 @@ Panel {
               onClicked: { root.editing = false; root.page = "launcher" }
             }
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: "Settings"
               color: Color.popups.text
@@ -1025,6 +1035,7 @@ Panel {
               font.bold: true
             }
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               text: "v" + String(root.doctor.version || "")
@@ -1042,14 +1053,14 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.space(6)
-            Dropdown {
+            PlainDropdown {
               width: (parent.width - Style.space(12)) / 3
               label: "Frame rate"
               options: [ { value: "30", label: "30 fps" }, { value: "60", label: "60 fps" } ]
               value: String(Omareel.get(root.config, "fps", 30))
               onChanged: function(v) { root.setConfig("fps", parseInt(v)) }
             }
-            Dropdown {
+            PlainDropdown {
               width: (parent.width - Style.space(12)) / 3
               label: "Quality"
               options: [
@@ -1061,7 +1072,7 @@ Panel {
               value: String(Omareel.get(root.config, "quality", "very_high"))
               onChanged: function(v) { root.setConfig("quality", v) }
             }
-            Dropdown {
+            PlainDropdown {
               width: (parent.width - Style.space(12)) / 3
               label: "Codec"
               options: [
@@ -1073,14 +1084,14 @@ Panel {
               onChanged: function(v) { root.setConfig("codec", v) }
             }
           }
-          Toggle {
+          PlainToggle {
             width: parent.width
             label: "Keep the raw take"
             description: "Save <id>.raw.mp4 next to the cleaned-up file"
             checked: Omareel.get(root.config, "keepRaw", true) === true
             onClicked: root.setConfig("keepRaw", !(Omareel.get(root.config, "keepRaw", true) === true))
           }
-          Dropdown {
+          PlainDropdown {
             width: parent.width
             label: "Window capture"
             options: [
@@ -1101,14 +1112,14 @@ Panel {
 
           // -- Noise removal --
           Heading { text: "Noise removal" }
-          Toggle {
+          PlainToggle {
             width: parent.width
             label: "Set microphone volume when recording"
             description: "Off preserves your system level. Does not unmute the microphone."
             checked: Omareel.get(root.config, "manageMicVolume", false) === true
             onClicked: root.setConfig("manageMicVolume", !(Omareel.get(root.config, "manageMicVolume", false) === true))
           }
-          Dropdown {
+          PlainDropdown {
             visible: Omareel.get(root.config, "manageMicVolume", false) === true
             width: parent.width
             label: "Recording input level"
@@ -1125,7 +1136,7 @@ Panel {
           Hint {
             text: "Use system audio settings to choose a comfortable level. Different microphones need different gain."
           }
-          Dropdown {
+          PlainDropdown {
             width: parent.width
             label: "Engine"
             options: [
@@ -1138,7 +1149,7 @@ Panel {
             value: String(Omareel.get(root.config, "denoiseEngine", "auto"))
             onChanged: function(v) { root.setConfig("denoiseEngine", v) }
           }
-          Dropdown {
+          PlainDropdown {
             width: parent.width
             label: "Strength"
             options: [
@@ -1159,7 +1170,7 @@ Panel {
 
           // -- Sharing --
           Heading { text: "Sharing" }
-          Dropdown {
+          PlainDropdown {
             width: parent.width
             label: "Destination"
             options: Omareel.PROVIDERS
@@ -1227,7 +1238,7 @@ Panel {
             path: "upload.publicBase"
             placeholder: root.provider === "b2" ? "https://f004.backblazeb2.com/file/<bucket>" : "https://pub-xxxx.r2.dev  or  https://v.yourdomain.com"
           }
-          Toggle {
+          PlainToggle {
             visible: root.provider !== "none"
             width: parent.width
             label: "Upload a player page"

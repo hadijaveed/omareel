@@ -333,6 +333,14 @@ configuration, failure paths and local HTTPS S3 integration (rclone 1.75.0,
 FFmpeg, Python 3, jq, curl and OpenSSL). Fixtures and credentials are synthetic;
 tests never contact cloud accounts or upload a real recording. GitHub Actions
 runs upload, workflow, setup/camera, helper and audio tests on pushes and pull requests.
+Run `python3 tests/text-security.py` for the UI security regression (Qt 6
+`qmltestrunner` with QtTest, QtQuick, Window, Controls, Templates and WorkerScript
+QML modules). It runs a simulated rclone failure through the real error handler
+and Hint, compares the rendered text with a literal reference, exercises device
+dropdowns/toggles, and checks a localhost request detector. The protected controls
+must make no image requests; a deliberately vulnerable AutoText control must
+make a request so a broken detector cannot give a false pass. This check also
+runs in CI and requires no camera, microphone, cloud credentials or live shell.
 Run `python3 tests/setup-regression.py` for synthetic first-run and failure
 tests. CI builds a pinned RNNoise LADSPA release and fails if it is missing,
 so the audio suite cannot silently skip.
@@ -341,6 +349,16 @@ DSP checks cover timing at multiple look-ahead
 settings, the final partial frame, silence, cleanup Off, and untouched desktop
 audio. A listening check on your own microphone remains necessary to choose
 between Natural, Clean, and Strong.
+
+### Untrusted text
+
+Omareel 0.9.1 treats endpoint errors, process output, recording titles, device
+names, paths, and configuration as plain text in its UI. HTML-looking messages
+are displayed literally, never used to load inline images. Local plain-text
+variants of the native dropdown and toggle retain the Omarchy look without
+modifying system components; see [third-party notices](THIRD_PARTY_NOTICES.md).
+This fixes the rich-text rendering issue identified during marketplace review;
+it is not a claim of a comprehensive security audit.
 
 ## CLI
 

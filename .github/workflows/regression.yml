@@ -19,6 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg jq curl unzip openssl nodejs cmake ninja-build g++
+          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-controls qml6-module-qtquick-templates qml6-module-qtqml-workerscript
       - name: Build pinned RNNoise LADSPA (same release as Omarchy)
         working-directory: /tmp
         run: |
@@ -42,6 +43,8 @@ jobs:
         run: python3 tests/upload-regression.py
       - name: Test recording workflow
         run: python3 tests/workflow-regression.py
+      - name: Test untrusted text rendering and loopback request isolation
+        run: python3 tests/text-security.py
       - name: Test fresh setup and camera negotiation
         run: python3 tests/setup-regression.py
       - name: Test audio (fail instead of skipping when RNNoise is missing)
