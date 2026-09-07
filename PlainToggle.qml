@@ -1,7 +1,7 @@
 // Omarchy 4.0.1 control, MIT; see THIRD_PARTY_NOTICES.md.
 // Local variant: all labels are plain text, including dynamic device/config data.
 import QtQuick
-import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Labeled toggle row: title + optional description on the left, a
@@ -13,7 +13,7 @@ import qs.Ui
 // hover and activeFocus share the hover-cursor defaults.
 //
 // `rounded` is forwarded to the switch, which auto-detects from
-// Style.cornerRadius: pill shape when Hyprland corners are rounded, square on
+// Commons.Style.cornerRadius: pill shape when Hyprland corners are rounded, square on
 // sharp. Callers can override per-instance.
 BorderSurface {
   id: root
@@ -29,13 +29,13 @@ BorderSurface {
 
   // Switch shape follows the theme by default: pill on round, square on sharp.
   // Override per-instance if a caller wants the opposite.
-  property bool rounded: Style.cornerRadius > 0
+  property bool rounded: Commons.Style.cornerRadius > 0
 
-  property color foreground: Color.foreground
-  property color accent: Color.accent
-  property string fontFamily: Style.font.family
-  property real titleSize: Style.font.subtitle
-  property real descriptionSize: Style.font.caption
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property string fontFamily: Commons.Style.font.family
+  property real titleSize: Commons.Style.font.subtitle
+  property real descriptionSize: Commons.Style.font.caption
 
   signal clicked()
   signal hovered(bool isHovered)
@@ -45,14 +45,14 @@ BorderSurface {
   Keys.onEnterPressed: root.clicked()
   Keys.onSpacePressed: root.clicked()
 
-  implicitHeight: Math.max(54, content.implicitHeight + Style.spacing.huge)
-  implicitWidth: Style.space(240)
-  radius: Style.cornerRadius
+  implicitHeight: Math.max(54, content.implicitHeight + Commons.Style.spacing.huge)
+  implicitWidth: Commons.Style.space(240)
+  radius: Commons.Style.cornerRadius
 
   readonly property bool _hot: hasCursor || mouse.containsMouse
-  readonly property var _borderSpec: Border.controlSpec(activeFocus ? "focus" : (_hot ? "hover-cursor" : "normal"), foreground, accent)
+  readonly property var _borderSpec: Commons.Border.controlSpec(activeFocus ? "focus" : (_hot ? "hover-cursor" : "normal"), foreground, accent)
 
-  color: Style.controlFill(activeFocus, _hot, foreground, accent)
+  color: Commons.Style.controlFill(activeFocus, _hot, foreground, accent)
   borderSpec: _borderSpec
 
   Behavior on color { ColorAnimation { duration: 100 } }
@@ -62,13 +62,13 @@ BorderSurface {
     anchors.left: parent.left
     anchors.right: parent.right
     anchors.verticalCenter: parent.verticalCenter
-    anchors.leftMargin: root.borderLeft + Style.spacing.rowPaddingX
-    anchors.rightMargin: root.borderRight + Style.spacing.rowPaddingX
-    spacing: Style.spacing.rowPaddingX
+    anchors.leftMargin: root.borderLeft + Commons.Style.spacing.rowPaddingX
+    anchors.rightMargin: root.borderRight + Commons.Style.spacing.rowPaddingX
+    spacing: Commons.Style.spacing.rowPaddingX
 
     Column {
       width: parent.width - track.width - parent.spacing
-      spacing: Style.spacing.xs
+      spacing: Commons.Style.spacing.xs
       anchors.verticalCenter: parent.verticalCenter
 
       Text {

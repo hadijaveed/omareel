@@ -2,12 +2,12 @@
 // Local variant: all labels are plain text, including dynamic device/config data.
 import QtQuick
 import QtQuick.Controls
-import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Themed single-select dropdown. Trigger row paints with the kit's focus
-// chrome; the popup anchors below and uses Color.popups.background +
-// Color.popups.border so it reads as a panel surface rather than the
+// chrome; the popup anchors below and uses Commons.Color.popups.background +
+// Commons.Color.popups.border so it reads as a panel surface rather than the
 // platform-native ComboBox look.
 //
 // `options` accepts either a plain string[] or an array of
@@ -25,14 +25,14 @@ Item {
   property string value: ""
   property var options: []
 
-  property color foreground: Color.popups.text
-  property color background: Color.popups.background
-  property color popupBorder: Color.popups.border
-  property color accent: Color.accent
-  readonly property var popupBorderSpec: Border.localOrSurfaceSpec("popups", "border", popupBorder, Color.popups.border, Style.normalBorderWidth)
-  property string fontFamily: Style.font.family
-  property int rowHeight: Style.spacing.controlHeight
-  property int popupRowHeight: Style.spacing.popupRowHeight
+  property color foreground: Commons.Color.popups.text
+  property color background: Commons.Color.popups.background
+  property color popupBorder: Commons.Color.popups.border
+  property color accent: Commons.Color.accent
+  readonly property var popupBorderSpec: Commons.Border.localOrSurfaceSpec("popups", "border", popupBorder, Commons.Color.popups.border, Commons.Style.normalBorderWidth)
+  property string fontFamily: Commons.Style.font.family
+  property int rowHeight: Commons.Style.spacing.controlHeight
+  property int popupRowHeight: Commons.Style.spacing.popupRowHeight
   property bool showLabel: true
 
   // Panel-cursor flag. When true, the trigger renders the shared
@@ -66,12 +66,12 @@ Item {
     return value
   }
 
-  implicitWidth: Style.spacing.dropdownWidth
-  implicitHeight: showLabel && label !== "" ? rowHeight + Style.spacing.huge : rowHeight
+  implicitWidth: Commons.Style.spacing.dropdownWidth
+  implicitHeight: showLabel && label !== "" ? rowHeight + Commons.Style.spacing.huge : rowHeight
 
   Column {
     anchors.fill: parent
-    spacing: Style.spacing.labelGap
+    spacing: Commons.Style.spacing.labelGap
 
     Text {
       textFormat: Text.PlainText
@@ -79,7 +79,7 @@ Item {
       text: root.label
       color: Qt.darker(root.foreground, 1.4)
       font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Commons.Style.font.caption
       font.bold: true
     }
 
@@ -87,13 +87,13 @@ Item {
       id: trigger
       width: parent.width
       height: root.rowHeight
-      radius: Style.cornerRadius
+      radius: Commons.Style.cornerRadius
 
       readonly property bool _focused: trigger.activeFocus
       readonly property bool _hot: triggerHover.hovered || root.hasCursor
-      readonly property var _borderSpec: Border.controlSpec(trigger._focused ? "focus" : (trigger._hot ? "hover-cursor" : "normal"), root.foreground, root.accent)
+      readonly property var _borderSpec: Commons.Border.controlSpec(trigger._focused ? "focus" : (trigger._hot ? "hover-cursor" : "normal"), root.foreground, root.accent)
 
-      color: Style.controlFill(trigger._focused, trigger._hot, root.foreground, root.accent)
+      color: Commons.Style.controlFill(trigger._focused, trigger._hot, root.foreground, root.accent)
       borderSpec: _borderSpec
 
       activeFocusOnTab: true
@@ -118,12 +118,12 @@ Item {
         anchors.left: parent.left
         anchors.right: chevron.left
         anchors.verticalCenter: parent.verticalCenter
-        anchors.leftMargin: trigger.borderLeft + Style.spacing.controlPaddingX
-        anchors.rightMargin: trigger.borderRight + Style.spacing.md
+        anchors.leftMargin: trigger.borderLeft + Commons.Style.spacing.controlPaddingX
+        anchors.rightMargin: trigger.borderRight + Commons.Style.spacing.md
         text: root.currentLabel()
         color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: Commons.Style.font.body
         elide: Text.ElideRight
       }
 
@@ -132,11 +132,11 @@ Item {
         id: chevron
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        anchors.rightMargin: trigger.borderRight + Style.spacing.controlGap
+        anchors.rightMargin: trigger.borderRight + Commons.Style.spacing.controlGap
         text: "󰅀"
         color: Qt.darker(root.foreground, 1.2)
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: Commons.Style.font.body
       }
 
       MouseArea {
@@ -151,21 +151,21 @@ Item {
       Popup {
         id: popup
         x: 0
-        y: trigger.height + Style.spacing.xxs
+        y: trigger.height + Commons.Style.spacing.xxs
         width: trigger.width
-        implicitHeight: Math.min(root.options.length * root.popupRowHeight + Math.max(0, root.options.length - 1) * Style.spacing.labelGap + Style.spacing.xxs,
-                                 root.popupRowHeight * 8 + 7 * Style.spacing.labelGap + Style.spacing.xxs)
-        padding: Style.spacing.hairline
-        leftPadding: Border.left(root.popupBorderSpec) + Style.spacing.hairline
-        rightPadding: Border.right(root.popupBorderSpec) + Style.spacing.hairline
-        topPadding: Border.top(root.popupBorderSpec) + Style.spacing.hairline
-        bottomPadding: Border.bottom(root.popupBorderSpec) + Style.spacing.hairline
+        implicitHeight: Math.min(root.options.length * root.popupRowHeight + Math.max(0, root.options.length - 1) * Commons.Style.spacing.labelGap + Commons.Style.spacing.xxs,
+                                 root.popupRowHeight * 8 + 7 * Commons.Style.spacing.labelGap + Commons.Style.spacing.xxs)
+        padding: Commons.Style.spacing.hairline
+        leftPadding: Commons.Border.left(root.popupBorderSpec) + Commons.Style.spacing.hairline
+        rightPadding: Commons.Border.right(root.popupBorderSpec) + Commons.Style.spacing.hairline
+        topPadding: Commons.Border.top(root.popupBorderSpec) + Commons.Style.spacing.hairline
+        bottomPadding: Commons.Border.bottom(root.popupBorderSpec) + Commons.Style.spacing.hairline
         focus: true
 
         background: BorderSurface {
           color: root.background
           borderSpec: root.popupBorderSpec
-          radius: Style.cornerRadius
+          radius: Commons.Style.cornerRadius
         }
 
         onOpened: {
@@ -175,7 +175,7 @@ Item {
 
         contentItem: ListView {
           id: optionList
-          spacing: Style.spacing.labelGap
+          spacing: Commons.Style.spacing.labelGap
 
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
@@ -216,7 +216,7 @@ Item {
             width: optionList.width
             height: root.popupRowHeight
             color: index === optionList.currentIndex
-              ? Style.hoverFillFor(root.foreground, root.accent)
+              ? Commons.Style.hoverFillFor(root.foreground, root.accent)
               : "transparent"
 
             Text {
@@ -224,12 +224,12 @@ Item {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.spacing.controlPaddingX
-              anchors.rightMargin: Style.spacing.controlPaddingX
+              anchors.leftMargin: Commons.Style.spacing.controlPaddingX
+              anchors.rightMargin: Commons.Style.spacing.controlPaddingX
               text: root.optionLabel(modelData)
-              color: index === optionList.currentIndex ? Style.hoverStateColor(root.foreground, root.accent) : root.foreground
+              color: index === optionList.currentIndex ? Commons.Style.hoverStateColor(root.foreground, root.accent) : root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Commons.Style.font.body
               elide: Text.ElideRight
             }
 
