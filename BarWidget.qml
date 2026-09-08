@@ -33,7 +33,6 @@ Panel {
   property int nowSec: Math.floor(Date.now() / 1000)
 
   property string page: "launcher" // launcher | settings | recordings | studio
-  onPageChanged: contentViewport.contentY = 0
   property var recordings: []       // index.jsonl, newest first
   property string selectedFile: ""  // expanded row on the recordings page
   property string draftName: ""     // rename field on the recordings page
