@@ -1,0 +1,31 @@
+{
+  "status": "Draft; public metadata and website have not been changed by this file.",
+  "project": {
+    "repository": "https://github.com/hadijaveed/omareel",
+    "plugin_id": "hadijaveed.omareel",
+    "author": "Hadi Javeed"
+  },
+  "current_release": {
+    "version": "0.9.2",
+    "github_description": "Screen recorder for Omarchy with camera, voice cleanup, and sharing through your own storage. Keep recordings local or upload to R2, S3, or B2."
+  },
+  "studio_release": {
+    "version": "0.9.3",
+    "publish_after": "0.9.2 marketplace approval, multi-laptop Studio testing, and release approval",
+    "title": "Omareel \u2014 Screen recorder with Studio for Omarchy",
+    "description": "Record polished demos on Omarchy with click zoom, camera, and Studio backgrounds. Keep videos local or share from your own storage. Open source."
+  },
+  "github_topics": [
+    "omarchy",
+    "omarchy-plugin",
+    "screen-recorder",
+    "screencast",
+    "hyprland",
+    "wayland",
+    "quickshell",
+    "self-hosted",
+    "s3"
+  ],
+  "canonical_url": null,
+  "canonical_url_note": "Choose one permanent product URL after resolving the name overlap. Do not emit an empty or placeholder canonical link."
+}

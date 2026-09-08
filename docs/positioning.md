@@ -2,6 +2,8 @@
 
 Draft for the Studio release. Keep it on `feat/studio-mode` until the release
 gates in [the test plan](0.9.3-testing.md) are met.
+See the [search and discovery plan](search-discovery.md) for the name-overlap
+finding, search-facing copy, distribution and measurement.
 
 ## The promise
 

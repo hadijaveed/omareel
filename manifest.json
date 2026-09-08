@@ -19,7 +19,7 @@
     "displayName": "Omareel",
     "description": "Record, style, and share from the Omarchy bar.",
     "category": "System",
-    "aliases": ["omareel", "record", "screenrecord", "loom"],
+    "aliases": ["omareel", "record", "screenrecord", "loom", "studio", "screencast", "screen-recorder", "demo"],
     "allowMultiple": false,
     "defaultSection": "right"
   }

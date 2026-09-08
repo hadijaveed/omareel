@@ -1,6 +1,13 @@
-# Omareel
+# Omareel — screen recorder and Studio for Omarchy
 
 **Polished product demos, made on Omarchy.**
+
+[Install](#install) · [Studio preview](docs/0.9.3-testing.md) · [Hosting guide](docs/upload-providers.md)
+
+Omareel is an open-source screen recording plugin for Omarchy, the Arch Linux
+desktop built on Hyprland. This project is maintained by
+[Hadi Javeed](https://github.com/hadijaveed) at
+[hadijaveed/omareel](https://github.com/hadijaveed/omareel).
 
 Show what you built. Walk someone through a fix. Turn a quick recording into
 something you want to share. Omareel records your screen, camera, and voice,
@@ -98,6 +105,56 @@ portal Window capture needs click zoom off. The current camera self-view is
 part of the screen capture, so a zoom can temporarily crop it in the export.
 The editor shows a still-frame preview; check motion in the exported video.
 Studio currently exports SDR H.264 MP4 with a long edge up to 3840 pixels.
+
+## Questions before you install
+
+### Does Omareel work on Linux and Arch Linux?
+
+This plugin targets Omarchy Quattro (4.0) and later, using Omarchy's Hyprland
+and Quickshell environment on Arch Linux. It isn't a general-purpose package
+for every Arch desktop, Ubuntu, GNOME, or KDE. See the
+[tested versions and laptop checks](docs/0.9.3-testing.md).
+
+### Can I make screen recordings with automatic zoom?
+
+The 0.9.3 development branch adds **Zoom on clicks** in Studio. Enable it before
+recording; the styled export zooms toward your clicks and returns to the full
+view. The public 0.9.2 release does not include Studio or click zoom.
+
+### Is Omareel an alternative to Screen Studio on Omarchy?
+
+Studio covers a focused workflow: record a demo, add click zooms, choose a look,
+and export a separate MP4. It offers backgrounds, frames, shadows and canvas
+ratios. It does not offer every feature of Screen Studio or Tella; there is no
+multi-clip timeline, transcript editing, or synthetic cursor smoothing.
+[Studio's features and limits](docs/studio-mode.md) describe this build.
+
+### Can I self-host my recordings and use my own domain?
+
+Yes. Use your own S3-compatible server, or a bucket with a provider such as
+Cloudflare R2, AWS S3 or Backblaze B2. With a public playback URL configured,
+Omareel uploads the MP4, thumbnail and player page. You configure storage access,
+DNS and HTTPS for your domain. See the [hosting guide](docs/upload-providers.md).
+
+### Do I need an account, a subscription, or an internet connection?
+
+No Omareel account or subscription is required. The plugin is
+[MIT licensed](LICENSE). Capture and Studio export work locally after installing
+the required software and models. Downloads and optional sharing need a
+connection; a storage provider may charge for hosting or traffic.
+
+### Does Studio change the original video or process my voice again?
+
+No. Studio writes a new MP4 and keeps the original. It copies the original's
+audio packets without running voice cleanup again. Review the recording's
+Natural, Clean or Strong voice profile on a short take before styling it.
+
+### Which repository and install command belong to this plugin?
+
+Use [hadijaveed/omareel](https://github.com/hadijaveed/omareel), plugin ID
+`hadijaveed.omareel`, and the plugin installation instructions in this README. The author
+and repository identify this project when another search result has a similar
+name. A similarly named system package is not this plugin's installation path.
 
 ## Install
 
@@ -540,8 +597,8 @@ watch it, so the bar button, the floating controls, and the CLI always agree.
 - **A camera can only stream to one program at a time.** If Chromium,
   Firefox or a call app holds it (a Meet, Slack or Teams call, or a tab that
   was granted the camera), the camera cannot start. Omareel says so in the
-  launcher ("In use by Chromium") and in a notification, and records without
-  the camera. End the call or close that tab, then record again.
+  launcher and aborts the start when the requested camera cannot open.
+  End the call, close that tab, or turn Camera off, then record again.
 - Reliable Window mode records a fixed on-screen rectangle. Keep the selected
   window visible and in place during the take; covered pixels are recorded as
   covered. This avoids portal freezes caused by dynamic window resizing.
