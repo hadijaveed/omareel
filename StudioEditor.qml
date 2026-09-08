@@ -4,8 +4,8 @@ import Quickshell.Io
 import qs.Commons as Commons
 import qs.Ui
 
-// A finishing panel, not a timeline editor. All settings are local drafts
-// until explicitly remembered. Export always creates a separate recording.
+// A finishing panel, not a timeline editor. Appearance changes are remembered
+// automatically. Export always creates a separate recording.
 Column {
   id: root
   property string cli: ""
@@ -19,10 +19,15 @@ Column {
   property int revision: 0
   property int renderedRevision: -1
   property int requestedRevision: -1
+  property string pendingStyle: ""
+  property string savingStyle: ""
+  property string styleSaveError: ""
+  readonly property bool savingPreferences: rememberProc.running || pendingStyle !== ""
   readonly property bool exporting: exportProc.running
   readonly property bool waiting: previewProc.running || debounce.running
   signal finished()
   signal editing(bool focused)
+  signal styleSaved(var saved)
   spacing: Commons.Style.space(10)
 
   function defaults() {
@@ -54,6 +59,7 @@ Column {
     revision++
     feedback = ""
     debounce.restart()
+    rememberStyle()
   }
   function preset(name) {
     // Keep framing choices when changing the look; Reset restores everything.
@@ -68,6 +74,25 @@ Column {
     revision++
     feedback = ""
     debounce.restart()
+    rememberStyle()
+  }
+  function rememberStyle() {
+    // Serialize writes and keep the newest snapshot if controls change while
+    // a previous write is running. Never merge an older style over a newer one.
+    pendingStyle = JSON.stringify(style)
+    styleSaveError = ""
+    savePendingStyle()
+  }
+  function savePendingStyle() {
+    if (rememberProc.running || !pendingStyle) return
+    savingStyle = pendingStyle
+    pendingStyle = ""
+    rememberProc.command = [cli, "config", "merge", JSON.stringify({studio:{style:JSON.parse(savingStyle)}})]
+    rememberProc.running = true
+  }
+  function resetStyle() {
+    begin(file, null)
+    rememberStyle()
   }
   function preview() {
     if (!file || exporting) return
@@ -117,7 +142,11 @@ Column {
     stdout: StdioCollector {}
     stderr: StdioCollector { id: rememberErr }
     onExited: function(code) {
-      root.feedback = code === 0 ? "Style saved for your next Studio recording." : (rememberErr.text.trim() || "Could not save your style. Try again.")
+      if (code === 0) {
+        root.styleSaveError = ""
+        root.styleSaved(JSON.parse(root.savingStyle))
+      } else root.styleSaveError = "Could not remember these changes. " + (rememberErr.text.trim() || "Try saving again.")
+      if (root.pendingStyle) root.savePendingStyle()
     }
   }
   Process {
@@ -190,15 +219,12 @@ Column {
     spacing: Commons.Style.space(6)
     enabled: !root.exporting
     Action { text: root.adjusting ? "Hide adjustments" : "Adjust"; onClicked: root.adjusting = !root.adjusting }
-    Action { text: "Reset"; onClicked: root.begin(root.file, null) }
-    Action {
-      text: rememberProc.running ? "Saving…" : "Remember style"
-      enabled: !rememberProc.running
-      onClicked: {
-        rememberProc.command = [root.cli,"config","merge",JSON.stringify({studio:{style:root.style}})]
-        rememberProc.running = true
-      }
-    }
+    Action { text: "Reset"; onClicked: root.resetStyle() }
+    Action { visible: root.styleSaveError !== ""; text: "Retry save"; enabled: !root.savingPreferences; onClicked: root.rememberStyle() }
+  }
+  Hint {
+    text: root.savingPreferences ? "Saving your style…" : root.styleSaveError || "Style changes are remembered for your next video."
+    opacity: root.styleSaveError ? 1 : 0.7
   }
   Column {
     width: parent.width

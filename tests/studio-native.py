@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 
@@ -42,28 +43,41 @@ def main():
             file.write_text("#!/bin/sh\n"+body+"\n")
             file.chmod(0o700)
         screenshot = temp/"preview.png"
+        # Make writes overlap so the real UI must queue the latest selection.
+        cli = temp/"slow-cli"
+        cli.write_text('#!/bin/bash\nif [[ $1 == config && $2 == merge ]]; then sleep 0.15; fi\nexec '
+                       + shlex.quote(str(ROOT/"bin/omareel")) + ' "$@"\n')
+        cli.chmod(0o700)
+        fail_cli = temp/"fail-cli"
+        fail_cli.write_text('#!/bin/sh\necho "Simulated settings write failure" >&2\nexit 1\n')
+        fail_cli.chmod(0o700)
         template = (ROOT/"tests/studio-native.qml").read_text()
-        for marker, value in {"__CLI__":str(ROOT/"bin/omareel"),"__VIDEO__":str(video),
+        for marker, value in {"__CLI__":str(cli),"__FAIL_CLI__":str(fail_cli),"__VIDEO__":str(video),
                               "__DEFAULTS__":studio.DEFAULTS,"__SCREENSHOT__":str(screenshot)}.items():
             template = template.replace(marker,json.dumps(value))
-        (temp/"shell.qml").write_text(template)
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen",QT_QUICK_BACKEND="software",QT_QPA_PLATFORMTHEME="",XDG_RUNTIME_DIR=directory,
                    XDG_CACHE_HOME=str(temp/"cache"),OMAREEL_CONFIG=str(config),RCLONE_CONFIG=str(temp/"unused.conf"),
                    PATH=str(mocks)+os.pathsep+os.environ["PATH"])
         env.pop("OMAREEL_OPERATION_LOCKED",None)
-        result = subprocess.run(["quickshell","-p",directory,"--no-color"],env=env,capture_output=True,text=True,timeout=60)
-        output = result.stdout+result.stderr
-        assert result.returncode == 0 and "STUDIO NATIVE PASS" in output, output
-        for error in ("STUDIO TEST FAIL","ReferenceError","TypeError","Unable to assign","Failed to load configuration"):
-            assert error not in output, output
-        saved = json.loads(config.read_text())
-        assert saved["studio"]["style"] == studio.DEFAULTS
-        assert saved["studio"]["enabled"] is False and saved["mic"] is False
+        expected = studio.DEFAULTS | dict(preset="custom",padding="small",shadow=False,aspect="landscape")
+        for reopening in (False, True):
+            previous = json.loads(config.read_text())["studio"].get("style", {})
+            qml = template.replace("__REOPEN__",json.dumps(reopening)).replace("__SAVED_STYLE__",json.dumps(previous))
+            (temp/"shell.qml").write_text(qml)
+            result = subprocess.run(["quickshell","-p",directory,"--no-color"],env=env,capture_output=True,text=True,timeout=60)
+            output = result.stdout+result.stderr
+            assert result.returncode == 0 and "STUDIO NATIVE PASS" in output, output
+            for error in ("STUDIO TEST FAIL","ReferenceError","TypeError","Unable to assign","Failed to load configuration"):
+                assert error not in output, output
+            saved = json.loads(config.read_text())
+            assert saved["studio"]["style"] == (expected | dict(padding="large") if reopening else expected), saved
+            assert saved["studio"]["enabled"] is False and saved["mic"] is False
+            assert saved["upload"] == {"provider":"none"} and saved["outputDir"] == directory
         state = json.loads((temp/"omareel/state.json").read_text())
         assert state["phase"] == "done" and state["file"] != str(video)
         assert Path(state["file"]).is_file() and video.is_file()
         assert screenshot.is_file()
-        print("PASS: native offscreen Studio controls, real preview/export, preserved config and original")
+        print("PASS: native Studio controls/export, automatic last-style persistence, fresh-process restore, failure/retry, preserved config and original")
 
 
 if __name__ == "__main__":

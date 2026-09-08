@@ -50,10 +50,16 @@ continue; the bar shows it is busy until the copy is ready.
 | Canvas | Original aspect ratio | Landscape 16:9, Square 1:1, Portrait 9:16 |
 | Zoom on clicks | Off | Enable before recording; zooms follow recorded clicks |
 
-**Remember style** saves the appearance for later; it does not turn
-Studio on, change microphone settings, or change your sharing destination.
-**Reset** restores the current draft to defaults; remember it if you also want
-to reset your saved preference. Switching looks keeps your canvas/zoom choices.
+Appearance changes save automatically for your next video: look, background,
+spacing, frame, shadow and canvas. There is no separate **Remember style** step.
+The status below Adjust shows when a save is running; if it fails, **Retry save**
+tries again. Changes are stored locally in `studio.style` in Omareel's settings.
+They do not turn Studio on, change microphone settings, or change sharing.
+
+**Reset** restores and saves the defaults. Switching looks keeps your canvas
+choice, while applying that look's background, frame, spacing and shadow.
+Restyling an existing Studio export opens that video's own saved appearance;
+new recordings start with your most recently remembered choices.
 
 Local backgrounds must be PNG, JPEG or WebP files up to 50 MB / 40 megapixels. Paste their local
 path in Adjust; web URLs and SVG are deliberately not accepted. If you move or

@@ -49,7 +49,8 @@ toggle off for an uninterrupted view of the screen.
 Choose **Midnight**, **Paper**, or **Minimal**, then export a styled copy.
 Adjust the background, spacing, frame, and shadow when you need to. Keep the
 original aspect ratio, or choose landscape, square, or portrait. Use a local
-image for your own background.
+image for your own background. Your adjustments are remembered automatically
+for the next video, including frame, spacing, shadow, and canvas.
 
 <p align="center">
   <img src="docs/studio-editor.png" width="560" alt="Actual Omareel Studio editor with the Midnight preview, look selection, and Export styled copy action">

@@ -518,6 +518,15 @@ Panel {
           width: parent.width
           visible: root.page === "studio"
           cli: root.cli
+          onStyleSaved: function(saved) {
+            // Update immediately as well as reloading the file: config writes
+            // replace it atomically, so a file watcher can miss that change.
+            var updated = JSON.parse(JSON.stringify(root.config))
+            updated.studio = updated.studio || {}
+            updated.studio.style = saved
+            root.config = updated
+            configFile.reload()
+          }
           onEditing: function(focused) { root.editing = focused }
           onFinished: { root.page = "launcher"; root.refreshAll(); indexFile.reload() }
         }
