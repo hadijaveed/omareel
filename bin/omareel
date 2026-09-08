@@ -1158,6 +1158,13 @@ afftdn_expander() {
   esac
 }
 
+# Keep the natural voice component through quiet syllables and word endings.
+# The guide is measured before loudness normalization, when a quiet microphone
+# can be well below speech playback level. Still attenuate it fully in pauses.
+voice_detail_gate() {
+  echo "sidechaingate=threshold=0.004:ratio=2:range=0.05:attack=5:release=400:knee=4"
+}
+
 # voice_graph <input-label> <engine> <output-label>
 # Produces a complete labeled filtergraph fragment for the microphone track.
 voice_graph() {
@@ -1183,7 +1190,7 @@ voice_graph() {
       # the cleaned voice as a guide so it does not restore room hiss in gaps.
       # Pad the dry side too: sidechaingate otherwise sees its EOF while the
       # wet branch is still flushing and can drop the last look-ahead interval.
-      echo "[$input]$base,asetnsamples=n=480:p=0,asplit=2[${output}_dry][${output}_in];[${output}_in]$denoiser,asplit=2[${output}_wet][${output}_guide];[${output}_dry]apad=pad_len=$delay[${output}_drypad];[${output}_drypad][${output}_guide]sidechaingate=threshold=0.008:ratio=2:range=0.05:attack=5:release=250:knee=4[${output}_natural];[${output}_wet][${output}_natural]amix=inputs=2:weights='$wet $dry':duration=first:normalize=0,$tone,$compressor[$output]"
+      echo "[$input]$base,asetnsamples=n=480:p=0,asplit=2[${output}_dry][${output}_in];[${output}_in]$denoiser,asplit=2[${output}_wet][${output}_guide];[${output}_dry]apad=pad_len=$delay[${output}_drypad];[${output}_drypad][${output}_guide]$(voice_detail_gate)[${output}_natural];[${output}_wet][${output}_natural]amix=inputs=2:weights='$wet $dry':duration=first:normalize=0,$tone,$compressor[$output]"
     fi
     ;;
   arnndn)

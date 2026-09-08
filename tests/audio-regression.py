@@ -125,6 +125,22 @@ class AudioRegression(unittest.TestCase):
         result = self.helper('loudnorm_measure_graph "$1" "[0:a:0]anull[premaster]"', str(raw))
         self.assertEqual(result.stdout.strip(), "volume=18dB")
 
+    def test_natural_detail_survives_a_quiet_ending_then_closes_in_pause(self):
+        gate = self.helper('voice_detail_gate').stdout.strip()
+        # Isolate the detail gate from the model's speech classification: a
+        # clear guide falls to a quiet 200 ms ending, then stops completely.
+        result = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+            "aevalsrc=0.003*sin(2*PI*200*t):s=48000:d=2", "-f", "lavfi", "-i",
+            r"aevalsrc=if(lt(t\,1)\,0.02\,if(lt(t\,1.2)\,0.0015\,0))*sin(2*PI*200*t):s=48000:d=2",
+            "-filter_complex", f"[0:a][1:a]{gate}[out]", "-map", "[out]",
+            "-f", "f32le", "-"], capture_output=True, check=True, timeout=10)
+        samples = pcm(result.stdout)
+        def gain(start, end):
+            interval = samples[int(start*48000):int(end*48000)]
+            return math.sqrt(sum(x*x for x in interval)/len(interval))/(0.003/math.sqrt(2))
+        self.assertGreater(gain(1.15, 1.2), 0.8, "Quiet ending lost its natural detail")
+        self.assertLess(gain(1.8, 1.9), 0.06, "Detail gate restored noise during a pause")
+
     def test_desktop_bypasses_voice_processing(self):
         self.settings["vadThreshold"] = 50
         graph = self.helper('audio_graph 2 true true ladspa').stdout.strip()
