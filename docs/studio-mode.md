@@ -14,20 +14,24 @@ FFmpeg requirements and never records extra devices or downloads backgrounds.
 4. Choose **Export styled copy**, or **Use original** to skip styling.
 5. Open the saved video to check playback. Choose Upload or Copy as usual.
 
-## Manual zooms
+## Zoom on clicks
 
-Use the time slider to find a moment, then choose **Add zoom here** and click
-the part of the picture to enlarge. Set the start and end seconds and choose
-1.25×, 1.5× or 2×. The video smoothly zooms in, holds, and returns to its original
-framing by the end of that range; the background and decorative frame stay still.
-Use **View zoom** to inspect its midpoint, or **Remove** to delete it.
+Turn on **Zoom on clicks** beneath the Studio toggle before recording. Ordinary
+left-clicks inside the recorded area produce a short 1.5× zoom in the exported
+video, followed by a smooth return. Rapid clicks finish the current two-second
+zoom before starting another. There are no start/end fields, focus selectors,
+or timeline controls. With the toggle off, nothing zooms.
 
-You can add up to eight non-overlapping zooms, at least half a second each.
-While choosing a focus point, the preview shows the unzoomed picture. The point
-stays at its relative position in the frame as the picture enlarges. The slider
-shows frame previews; check the motion in the exported video with Open.
-These zooms are added manually in Studio after recording. Recording-time mouse
-clicks are not captured or turned into zooms automatically.
+Click locations are collected only for that recording, stored locally, and are
+not included in uploads. Existing recordings have no click history: record a
+new take with the toggle on. Area, Screen and direct Window capture are supported;
+the optional portal Window mode needs the toggle off.
+
+With the camera enabled, this mode records it as a separate layer and keeps it
+in its chosen corner during zooms. Its floating self-view is hidden during
+capture to keep it out of the screen layer. The normal saved original and Studio
+export both include the camera. Keep the `.studio-screen.mp4` and
+`.studio-camera.mp4` companion files to restyle these takes later.
 
 You can also choose **Style** on a saved recording, even with Studio mode off.
 Closing Studio does not discard the video. Closing during export lets the job
@@ -43,11 +47,9 @@ continue; the bar shows it is busy until the copy is ready.
 | Frame | Rounded | None, Rounded, decorative application title bar |
 | Shadow | On | On/off |
 | Canvas | Original aspect ratio | Landscape 16:9, Square 1:1, Portrait 9:16 |
-| Screen framing | Fit | Fit without stretching, or Fill with edge cropping |
-| Fixed zoom | Off (1×) | 1.25× or 1.5×, with a position to keep in view |
+| Zoom on clicks | Off | Enable before recording; zooms follow recorded clicks |
 
-**Remember style** saves the appearance for later, excluding per-video zoom
-ranges and the preview time; it does not turn
+**Remember style** saves the appearance for later; it does not turn
 Studio on, change microphone settings, or change your sharing destination.
 **Reset** restores the current draft to defaults; remember it if you also want
 to reset your saved preference. Switching looks keeps your canvas/zoom choices.
@@ -75,22 +77,19 @@ remove the image, choose another background before exporting.
 
 ## Honest limits
 
-The preview shows the frame at the selected time, not video playback. The same layout/filter
+The preview shows the first frame, not video playback. The same layout/filter
 path is used for preview and export, but check the full exported video for
 motion and composition before sharing an important recording.
 
 Output is SDR H.264 MP4, quality CRF 18, at the original long edge capped at
 3840 pixels. Background spacing reduces the screen's size inside that canvas.
 Portrait or square output may leave generous background around a wide screen;
-Fill or zoom can crop important content. The original retains its full quality.
+Click zoom temporarily crops the screen around the clicked point. The original retains its full quality.
 Rendering uses two CPU encoding threads, so long or high-resolution videos take
 time and additional disk space. The disposable preview cache keeps eight frames.
 
-**Fixed zoom** under Adjust still crops the entire video. Manual zoom ranges
-animate only during the selected times. There is no automatic click zoom or
-cursor tracking. The camera is already part of the finished video;
-zoom/crop affects it too. Independent camera placement belongs in a future
-separate-layer capture design, not this toggle. HDR sources are rejected with
+Click zoom uses the recorded click location, not cursor tracking or typed text.
+The plain original keeps the whole screen. HDR sources are rejected with
 guidance to keep the original rather than silently changing their colors.
 
 ## Rollback and checks

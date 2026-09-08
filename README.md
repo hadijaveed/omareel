@@ -43,7 +43,7 @@ upload it, or copy its link or path:
   natural component to preserve speech detail. Neutral EQ and two-pass
   loudness normalisation keep the result consistent.
 - **Optional Studio finishing** (development branch): three simple looks,
-  backgrounds, smooth shadows, and manual timed zooms. Off by default; exports a separate copy
+  backgrounds, smooth shadows, and optional zoom on recorded clicks. Off by default; exports a separate copy
   and leaves your recorded audio alone. [Studio guide](docs/studio-mode.md).
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.

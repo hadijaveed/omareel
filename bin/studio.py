@@ -67,19 +67,112 @@ def options(value):
 
 def zoom_expressions(events):
     """The same timestamp expressions drive preview and export."""
-    z, x, y = "1", "0.5", "0.5"
+    z, x, y = ["1"], ["0.5"], ["0.5"]
     for event in events:
         start, end = event["start"], event["end"]
         ramp = min(.35, (end-start)/3)
         phase = f"min(clip((in_time-{start})/{ramp},0,1),clip(({end}-in_time)/{ramp},0,1))"
         eased = f"(({phase})*({phase})*(3-2*({phase})))"
         condition = f"between(in_time,{start},{end})"
-        z = f"if({condition},1+{event['amount']-1}*{eased},{z})"
+        z.append(f"{event['amount']-1}*{eased}")
         # This anchor stays at its relative screen position during the zoom,
         # avoiding the initial sideways jump of a clamped centered crop.
-        x = f"if({condition},{event['x']},{x})"
-        y = f"if({condition},{event['y']},{y})"
-    return z, f"(iw-iw/zoom)*({x})", f"(ih-ih/zoom)*({y})"
+        x.append(f"({event['x']-.5})*{condition}")
+        y.append(f"({event['y']-.5})*{condition}")
+    return "+".join(z), f"(iw-iw/zoom)*({'+'.join(x)})", f"(ih-ih/zoom)*({'+'.join(y)})"
+
+
+def recording_capture(source):
+    index = source.parent / "index.jsonl"
+    if index.exists():
+        for line in reversed(index.read_text().splitlines()):
+            try:
+                entry = json.loads(line)
+                if entry.get("file") == str(source):
+                    return entry.get("capture", {})
+            except ValueError:
+                continue
+    return {}
+
+
+def click_zooms(clicks, duration):
+    """One restrained zoom per click; finish it before accepting another."""
+    events = []
+    for click in sorted(clicks, key=lambda c: c["time"]):
+        start = max(0, float(click["time"]))
+        end = min(duration, start + 2)
+        if end-start < .5 or (events and start < events[-1]["end"]):
+            continue
+        x,y = float(click["x"]),float(click["y"])
+        if not all(math.isfinite(v) for v in (start,end,x,y)) or not 0 <= x <= 1 or not 0 <= y <= 1:
+            continue
+        events.append(dict(start=start,end=end,amount=1.5,x=x,y=y))
+        if len(events) == 512:
+            break
+    return events
+
+
+def camera_filter(camera, vw, vh, directory, video_index, mask_index, at=0):
+    cam = local_file(camera["file"])
+    info = probe(cam)
+    shape, size, position = camera["shape"],camera["size"],camera["position"]
+    ratio = {"frame":16/9,"classic":4/3,"portrait":8/9,"circle":1}[shape]
+    amount = {"full":1,"close":1.25,"tight":1.5}[camera["zoom"]]
+    bh = even(vh * {"small":.16,"medium":.22,"large":.30,"xlarge":.40}[size])
+    bw = even(bh * ratio)
+    cw,ch = info["width"],info["height"]
+    if cw/ch > ratio: cw = ch*ratio
+    else: ch = cw/ratio
+    cw,ch = even(cw/amount),even(ch/amount)
+    radius = bh//2 if shape == "circle" else bh*.08
+    mask = directory / "camera-mask.png"
+    png(mask,bw,bh,(rounded_row(bw,bh,radius,y) for y in range(bh)),0)
+    margin = int(vh*.03)
+    x = margin if "left" in position else vw-bw-margin if "right" in position else (vw-bw)//2
+    y = margin if "top" in position else vh-bh-margin if "bottom" in position else (vh-bh)//2
+    delta = float(camera["delta"]) - at
+    timing = f"trim=start={max(0,-delta)},setpts=PTS-STARTPTS"
+    graph = (f"[{video_index}:v]{timing},crop={cw}:{ch},scale={bw}:{bh}:flags=lanczos,format=rgb24[camrgb];"
+             f"[camrgb][{mask_index}:v]alphamerge[camalpha];")
+    if delta > 0:
+        graph += f"[camalpha]tpad=start_duration={delta}:color=0x00000000[cam];"
+    else:
+        graph += "[camalpha]null[cam];"
+    return graph,cam,mask,max(0,x),max(0,y)
+
+
+def prepare_camera(raw, final, settings):
+    """Keep clean screen and camera layers; make the normal original with camera.
+
+    Finalized audio is stream-copied. This never calls the audio cleanup chain.
+    """
+    prefix = str(raw).removesuffix(".raw.mp4")
+    cam = local_file(prefix + ".cam.mp4")
+    start = float(Path(prefix + ".cam.start").read_text())
+    cam_start = float(run(["ffprobe","-v","error","-show_entries","format=start_time",
+                           "-of","csv=p=0",str(cam)]).decode().strip())
+    camera = settings | dict(file=str(cam),delta=cam_start-start-.1)
+    info = probe(final)
+    screen_copy,cam_copy = Path(prefix+".studio-screen.mp4"),Path(prefix+".studio-camera.mp4")
+    with tempfile.TemporaryDirectory(prefix=".omareel-camera-",dir=final.parent) as work:
+        directory=Path(work)
+        graph,_,mask,x,y=camera_filter(camera,info["width"],info["height"],directory,1,2)
+        graph+=f"[0:v][cam]overlay={x}:{y}:eof_action=repeat,format=yuv420p[out]"
+        output=directory/"original.mp4"
+        run(["ffmpeg","-v","error","-nostdin","-filter_complex_threads","2","-i",str(final),
+             "-i",str(cam),"-i",str(mask),"-filter_complex",graph,"-map","[out]","-map","0:a?",
+             "-c:a","copy","-c:v","libx264","-crf","18","-preset","veryfast","-threads","2",
+             "-t",str(info["duration"]),"-movflags","+faststart",str(output)])
+        os.link(final,screen_copy)
+        try:
+            os.link(cam,cam_copy)
+            os.replace(output,final)
+        except BaseException:
+            screen_copy.unlink(missing_ok=True)
+            cam_copy.unlink(missing_ok=True)
+            raise
+    camera["file"]=str(cam_copy)
+    return dict(camera=camera,screen=str(screen_copy))
 
 
 def local_file(value):
@@ -258,13 +351,24 @@ def assets(directory, geo, opts):
 
 def render(source, opts, directory, preview=False):
     source = local_file(source)
+    capture = recording_capture(source)
     info = probe(source)
+    camera = capture.get("camera")
+    if capture.get("zoomOnClicks"):
+        opts = opts | dict(zoom="1",fit="fit",zooms=click_zooms(capture.get("clicks",[]),info["duration"]))
+    if camera:
+        try:
+            source = local_file(capture["screen"])
+            local_file(camera["file"])
+        except (OSError,KeyError):
+            raise ValueError("Camera layers are missing. Use the original to keep your camera visible.")
     if any(e["end"] > info["duration"] + .001 for e in opts["zooms"]):
         raise ValueError("A zoom ends after this recording. Adjust its time range.")
     if preview and opts["previewTime"] >= info["duration"]:
         raise ValueError("Choose a preview time before the end of the recording")
     geo = geometry(info, opts)
     geo["duration"] = info["duration"]
+    geo["clickZoom"] = capture.get("zoomOnClicks",False)
     bg, decor, mask = assets(directory, geo, opts)
     w,h,vw,vh,x,y,cw,ch,cx,cy = (geo[k] for k in ("w","h","vw","vh","x","y","cw","ch","cx","cy"))
     sw, sh = info["width"], info["height"]
@@ -279,10 +383,19 @@ def render(source, opts, directory, preview=False):
     graph = (f"[0:v:0]scale={sw}:{sh},setsar=1,crop={cw}:{ch}:{cx}:{cy},{screen},format=rgb24[screen];"
              "[screen][3:v]alphamerge[rounded];"
              "[1:v][2:v]overlay=format=auto[backdrop];"
-             f"[backdrop][rounded]overlay={x}:{y}:shortest=1:format=auto,format=yuv420p")
+             f"[backdrop][rounded]overlay={x}:{y}:shortest=1:format=auto[framed];")
+    cam_inputs = []
+    if camera:
+        camgraph,camfile,cammask,camx,camy = camera_filter(camera,vw,vh,directory,4,5,opts["previewTime"] if preview else 0)
+        graph += camgraph + f"[framed][cam]overlay={x+camx}:{y+camy}:eof_action=repeat,format=yuv420p"
+        cam_inputs = ["-i",str(camfile),"-i",str(cammask)]
+    else:
+        graph += "[framed]format=yuv420p"
     if preview:
         graph += ",scale=960:640:force_original_aspect_ratio=decrease"
     graph += "[out]"
+    graph_file = directory / "filters.txt"
+    graph_file.write_text(graph)
     target = directory / ("preview.png" if preview else "render.mp4")
     command = ["ffmpeg", "-v", "error", "-nostdin", "-filter_complex_threads", "2"]
     if preview:
@@ -290,7 +403,7 @@ def render(source, opts, directory, preview=False):
     command += [
                "-protocol_whitelist", "file,pipe", "-f", "mov", "-threads", "2", "-i", str(source),
                "-loop", "1", "-framerate", str(info["fps"]), "-i", str(bg), "-i", str(decor), "-i", str(mask),
-               "-filter_complex", graph, "-map", "[out]"]
+               *cam_inputs, "-/filter_complex", str(graph_file), "-map", "[out]"]
     if preview:
         command += ["-frames:v", "1", "-threads", "2"]
     else:
@@ -302,14 +415,18 @@ def render(source, opts, directory, preview=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preview", "export", "defaults"))
+    parser.add_argument("action", choices=("preview", "export", "defaults", "prepare-camera"))
     parser.add_argument("source", nargs="?")
     parser.add_argument("settings", nargs="?", default="{}")
+    parser.add_argument("camera_settings", nargs="?", default="{}")
     args = parser.parse_args()
     if args.action == "defaults":
         print(json.dumps(DEFAULTS))
         return
     source = local_file(args.source)
+    if args.action == "prepare-camera":
+        print(json.dumps(prepare_camera(source,local_file(args.settings),json.loads(args.camera_settings))))
+        return
     opts = options(json.loads(args.settings))
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omareel"
     runtime.mkdir(exist_ok=True, parents=True)
@@ -330,7 +447,8 @@ def main():
             for old in previews[8:]:
                 old.unlink(missing_ok=True)
         print(json.dumps(dict(file=str(dest), original=str(source), width=geo["w"], height=geo["h"],
-                             duration=geo["duration"], picture={k: geo[k] for k in ("x", "y", "vw", "vh")}, options=opts)))
+                             duration=geo["duration"],clickZoom=geo["clickZoom"],
+                             picture={k: geo[k] for k in ("x", "y", "vw", "vh")}, options=opts)))
 
 
 if __name__ == "__main__":

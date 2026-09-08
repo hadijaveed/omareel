@@ -720,6 +720,19 @@ Panel {
             checked: root.studioOn
             onClicked: root.setConfig("studio.enabled", !root.studioOn)
           }
+          PlainToggle {
+            visible: (root.idle || root.finished) && root.studioOn
+            width: parent.width
+            label: "Zoom on clicks"
+            description: "Zoom toward your clicks in the exported video. Camera stays in its corner."
+            checked: Omareel.get(root.config, "studio.zoomOnClicks", false) === true
+            onClicked: root.setConfig("studio.zoomOnClicks", !checked)
+          }
+          Hint {
+            visible: (root.idle || root.finished) && root.studioOn && root.webcamOn
+              && Omareel.get(root.config, "studio.zoomOnClicks", false) === true
+            text: "Camera preview hides while recording; your camera remains in the saved video."
+          }
 
           // Sources
           Heading { visible: root.idle || root.finished; text: "Sources" }

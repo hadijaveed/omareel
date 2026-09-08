@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("studio", ROOT / "bin/studio.py")
 studio = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(studio)
+clickspec = importlib.util.spec_from_file_location("clickzoom",ROOT/"bin/click-zoom.py")
+clickzoom = importlib.util.module_from_spec(clickspec)
+clickspec.loader.exec_module(clickzoom)
 
 
 class StudioRegression(unittest.TestCase):
@@ -149,6 +152,63 @@ class StudioRegression(unittest.TestCase):
                        [event | {"end":.3}], [{"start":0}]):
             self.assertNotEqual(self.render(opts=dict(zooms=events),check=False).returncode,0)
         self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(),self.digest)
+
+    def test_recorded_clicks_zoom_screen_while_camera_stays_visible(self):
+        raw = self.path / "layers.raw.mp4"
+        raw.write_bytes(self.video.read_bytes())
+        cam = self.path / "layers.cam.mp4"
+        self.ffmpeg("-f","lavfi","-i","color=red:size=160x120:rate=10:duration=1.5",
+                    "-c:v","libx264",str(cam))
+        (self.path/"layers.cam.start").write_text("-0.1")
+        audio = self.packets(self.video)
+        metadata = studio.prepare_camera(raw,self.video,dict(size="medium",shape="portrait",position="top-right",zoom="full"))
+        self.assertEqual(self.packets(self.video),audio)
+        metadata |= dict(zoomOnClicks=True,clicks=[dict(time=.2,x=.2,y=.7)])
+        (self.path/"index.jsonl").write_text(json.dumps(dict(file=str(self.video),capture=metadata))+"\n")
+        result = self.render()
+        self.assertTrue(result["clickZoom"])
+        self.assertEqual(self.packets(result["file"]),audio)
+        opts=studio.options({})
+        geo=studio.geometry(studio.probe(self.video),opts)
+        _,_,_,cx,cy=studio.camera_filter(metadata["camera"],geo["vw"],geo["vh"],self.path,4,5)
+        bw=studio.even(studio.even(geo["vh"]*.22)*8/9)
+        bh=studio.even(geo["vh"]*.22)
+        for at in (0,.8,1.3):
+            frame=self.ffmpeg("-ss",str(at),"-i",result["file"],"-frames:v","1","-pix_fmt","rgb24","-f","rawvideo","-").stdout
+            pixel=((geo["y"]+cy+bh//2)*geo["w"]+geo["x"]+cx+bw//2)*3
+            red,green,blue=frame[pixel:pixel+3]
+            self.assertGreater(red,180,"Camera must stay visible in its corner during the zoom")
+            self.assertLess(max(green,blue),80)
+        # Clean screen contains no baked-in webcam, so zoom cannot duplicate it.
+        self.assertEqual(Path(metadata["screen"]).read_bytes(),raw.read_bytes())
+        preview=self.render("preview")
+        self.assertTrue(Path(preview["file"]).is_file())
+
+    def test_click_zoom_ignores_rapid_repeats_and_outside_points(self):
+        clicks=[dict(time=.2,x=.25,y=.75),dict(time=.3,x=.5,y=.5),dict(time=3,x=2,y=.5),dict(time=4,x=.8,y=.1)]
+        events=studio.click_zooms(clicks,6)
+        self.assertEqual(len(events),2)
+        self.assertEqual(events[0],dict(start=.2,end=2.2,amount=1.5,x=.25,y=.75))
+        self.assertEqual(events[1]["start"],4)
+
+    def test_click_capture_records_only_active_in_region_points(self):
+        session=self.path/"click-session.json"
+        events=self.path/"events.jsonl"
+        state=dict(token="test-token",active=True,pid=os.getpid(),pidStart=clickzoom.process_start(os.getpid()),
+                   started=100,region=[-100,50,200,100],events=str(events))
+        session.write_text(json.dumps(state))
+        with patch.object(clickzoom.time,"time",return_value=100.6):
+            clickzoom.emit(str(session),"test-token",-50,100)
+            clickzoom.emit(str(session),"test-token",150,100) # outside recorded area
+            clickzoom.emit(str(session),"other-token",-50,100)
+            session.write_text(json.dumps(state | dict(pidStart="reused-pid")))
+            clickzoom.emit(str(session),"test-token",-50,100)
+            session.write_text(json.dumps(state | dict(active=False)))
+            clickzoom.emit(str(session),"test-token",-50,100)
+            session.unlink()
+            clickzoom.emit(str(session),"test-token",-50,100)
+        data=[json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual(data,[dict(time=.5,x=.25,y=.5)])
 
     def test_corners_are_antialiased_and_shadow_fades_inside_canvas(self):
         opts = studio.options({})

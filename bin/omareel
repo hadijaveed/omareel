@@ -77,7 +77,7 @@ default_config() {
   "vadRetroactiveMs": 50,
   "desktopMix": 0.5,
   "keepRaw": true,
-  "studio": { "enabled": false, "style": {} },
+  "studio": { "enabled": false, "zoomOnClicks": false, "style": {} },
   "upload": {
     "auto": false,
     "provider": "none",
@@ -171,7 +171,7 @@ set_state() {
   # target/timer while processing and the URL when done.
   jq -n "${args[@]}" --argjson prev "$previous" \
     '($prev | {id, target, targetKind, region, file, startedAt, stoppedAt, url, title,
-      webcamSize, webcamShape, webcamPosition, webcamZoom, studioEnabled}) + '"$filter" \
+      webcamSize, webcamShape, webcamPosition, webcamZoom, studioEnabled, zoomOnClicks, studioCameraSeparate}) + '"$filter" \
     >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
@@ -364,6 +364,7 @@ start_webcam() {
   local shape="${5:-$(cfg .webcamShape frame)}"
   local position="${6:-$(webcam_position)}"
   local zoom="${7:-$(cfg .webcamZoom full)}"
+  local capture_only="${8:-false}"
   cleanup_webcam # an orphaned capture from a crashed run would hold the camera
   formats=$(timeout 5 v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null) || return 1
   mode=$(python3 "$PLUGIN_DIR/bin/system-check.py" camera <<<"$formats") || return 1
@@ -371,6 +372,17 @@ start_webcam() {
   fps=$(jq -r '.fps' <<<"$mode")
   input=(-input_format "$(jq -r '.format' <<<"$mode")")
   log "camera negotiated $device: $size at $fps fps ($(jq -r .format <<<"$mode"))"
+
+  if [[ $capture_only == true ]]; then
+    # Click-zoom takes keep the camera separate from the KMS screen. Compose
+    # it above the zoom afterward, so it never grows, duplicates or vanishes.
+    ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate "$fps" -video_size "$size" \
+      -use_wallclock_as_timestamps 1 -i "$device" -map 0:v \
+      -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts \
+      "$out" >>"$LOG_FILE" 2>&1 &
+    echo $! >"$CAM_PID_FILE"
+    return 0
+  fi
 
   # Self-view shape: crop to the shape's aspect, then a pre-rendered alpha
   # mask (alphamerge is a plane copy; a per-frame geq mask ran at 14 fps).
@@ -640,6 +652,8 @@ cmd_start() {
   local studio_enabled
   studio_enabled=$(cfg .studio.enabled false)
   [[ $studio_enabled != true ]] || upload=none
+  local click_zoom=false
+  [[ $studio_enabled == true && $(cfg .studio.zoomOnClicks false) == true ]] && click_zoom=true
 
   local arg
   for arg in "$@"; do
@@ -680,6 +694,12 @@ cmd_start() {
   fi
 
   local output_dir
+  if [[ $click_zoom == true ]]; then
+    local click_check
+    click_check=$(python3 "$PLUGIN_DIR/bin/click-zoom.py" check 2>&1) || {
+      start_error "$click_check"; return 1;
+    }
+  fi
   output_dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
   mkdir -p "$output_dir" || { start_error "Cannot create the recording folder: $output_dir"; return 1; }
 
@@ -754,9 +774,16 @@ cmd_start() {
     ;;
   esac
 
+  if [[ $click_zoom == true && -z $region ]]; then
+    start_error "Zoom on clicks needs Area, Screen, or direct Window capture. Select direct Window in Settings or turn Zoom on clicks off."
+    return 1
+  fi
+
   # The camera starts first: it needs ~1 s to warm up, and the extra footage
   # before the recording starts is trimmed by finalize.
   local id raw cam_device webcam_size webcam_shape webcam_position_value webcam_zoom
+  local separate_camera=false
+  [[ $click_zoom == true && $webcam == true ]] && separate_camera=true
   id=$(new_id)
   raw="$output_dir/$id.raw.mp4"
   webcam_size=$(cfg .webcamSize medium)
@@ -767,7 +794,7 @@ cmd_start() {
   if [[ $webcam == true ]]; then
     if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
       if ! start_webcam "$cam_device" "${raw%.raw.mp4}.cam.mp4" "$region" \
-        "$webcam_size" "$webcam_shape" "$webcam_position_value" "$webcam_zoom" \
+        "$webcam_size" "$webcam_shape" "$webcam_position_value" "$webcam_zoom" "$separate_camera" \
         || ! wait_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4"; then
         cleanup_webcam
         start_error "Camera could not start. Close apps using it, choose another camera, or turn Camera off."
@@ -828,9 +855,11 @@ cmd_start() {
 
   # Wall-clock moment the recorder started writing: finalize lines the camera
   # take up against it.
+  local capture_started
+  capture_started=$(date +%s.%N)
   if [[ -f $CAM_PID_FILE ]]; then
     if webcam_capture_alive; then
-      date +%s.%N >"${raw%.raw.mp4}.cam.start"
+      printf '%s\n' "$capture_started" >"${raw%.raw.mp4}.cam.start"
     else
       webcam_failed "${cam_device:-camera}" "capture exited before the recording started"
       stop_webcam_capture
@@ -838,10 +867,25 @@ cmd_start() {
     fi
   fi
 
+  if [[ $click_zoom == true ]]; then
+    python3 "$PLUGIN_DIR/bin/click-zoom.py" watch "$raw" "$pid" "$region" "$capture_started" >>"$LOG_FILE" 2>&1 &
+    local click_pid=$! click_wait=0
+    while [[ ! -f $RUNTIME_DIR/$id.click-session.ready ]] && kill -0 "$click_pid" 2>/dev/null && ((click_wait < 30)); do
+      sleep .1; ((click_wait++))
+    done
+    if [[ ! -f $RUNTIME_DIR/$id.click-session.ready ]]; then
+      kill -TERM "$click_pid" "$pid" 2>/dev/null || true
+      cleanup_webcam
+      start_error "Click tracking could not start. Turn Zoom on clicks off to record normally. Details: $LOG_FILE"
+      return 1
+    fi
+  fi
+
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload" mic="$mic" desktop="$desktop" \
     webcamSize="$webcam_size" webcamShape="$webcam_shape" \
-    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom" studioEnabled="$studio_enabled"
+    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom" studioEnabled="$studio_enabled" \
+    zoomOnClicks="$click_zoom" studioCameraSeparate="$separate_camera"
 }
 
 compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check "$CONFIG_FILE" "$@"; }
@@ -866,6 +910,7 @@ cmd_stop() {
   local pid raw denoise upload mic desktop webcam_size webcam_shape webcam_position_value webcam_zoom
   pid=$(cat "$PID_FILE")
   raw=$(state_get file)
+  [[ $(state_get zoomOnClicks) != true ]] || python3 "$PLUGIN_DIR/bin/click-zoom.py" stop "$raw"
   denoise=$(state_get denoise)
   upload=$(state_get upload)
   mic=$(state_get mic)
@@ -913,7 +958,23 @@ cmd_stop() {
       return 1
     }
     processing_warning="Cleanup failed; saved the unprocessed recording. The raw take is retained."
-  elif [[ $(cfg .keepRaw true) != true ]]; then
+  fi
+  local capture='{}'
+  if [[ $(state_get studioCameraSeparate) == true ]]; then
+    local camera_settings
+    camera_settings=$(jq -nc --arg size "$webcam_size" --arg shape "$webcam_shape" \
+      --arg position "$webcam_position_value" --arg zoom "$webcam_zoom" '{size:$size,shape:$shape,position:$position,zoom:$zoom}')
+    capture=$(python3 "$PLUGIN_DIR/bin/studio.py" prepare-camera "$raw" "$final" "$camera_settings" 2>>"$LOG_FILE") || {
+      set_state error file="$final" error="Could not combine the camera. Screen and camera originals are retained; see $LOG_FILE"
+      return 1
+    }
+  fi
+  if [[ $(state_get zoomOnClicks) == true ]]; then
+    local clicks
+    clicks=$(python3 "$PLUGIN_DIR/bin/click-zoom.py" collect "$raw")
+    capture=$(jq -c --argjson clicks "$clicks" '. + {zoomOnClicks:true,clicks:$clicks}' <<<"$capture")
+  fi
+  if [[ -z $processing_warning && $(cfg .keepRaw true) != true ]]; then
     rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
   fi
   rm -f "${raw%.raw.mp4}.cam.start"
@@ -930,6 +991,7 @@ cmd_stop() {
   share="${url:-$final}"
   printf '%s' "$share" | wl-copy 2>/dev/null || true
   append_index "$final" "$url"
+  [[ $capture == '{}' ]] || index_patch "$final" '.capture = $capture' --argjson capture "$capture"
 
   local can_upload=false
   [[ -z $url ]] && upload_ready && can_upload=true
@@ -961,6 +1023,7 @@ cmd_cancel() {
     local pid raw
     pid=$(cat "$PID_FILE")
     raw=$(state_get file)
+    [[ $(state_get zoomOnClicks) != true ]] || python3 "$PLUGIN_DIR/bin/click-zoom.py" stop "$raw"
     kill -INT "$pid" 2>/dev/null
     sleep 0.5
     kill -9 "$pid" 2>/dev/null
