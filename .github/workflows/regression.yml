@@ -43,6 +43,8 @@ jobs:
         run: python3 tests/upload-regression.py
       - name: Test recording workflow
         run: python3 tests/workflow-regression.py
+      - name: Test non-destructive Studio exports
+        run: python3 tests/studio-regression.py
       - name: Test untrusted text rendering and loopback request isolation
         run: python3 tests/text-security.py
       - name: Test fresh setup and camera negotiation

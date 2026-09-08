@@ -22,8 +22,10 @@ on each supported hardware family before broad certification.
 
 ## Automated release checks
 
-Run shell syntax, `node tests/helpers.js`, and all four Python regression
-suites: setup, workflow, audio, upload. Upload integration uses a local HTTPS
+Run shell syntax, `node tests/helpers.js`, and the Python regression
+suites: setup, workflow, audio, upload, text-security and studio-regression.
+Studio is an opt-in development-branch feature; see [its guide](studio-mode.md).
+Upload integration uses a local HTTPS
 S3-compatible fixture, never a customer's account. QML parser and Omarchy
 manifest validation complement these tests but do not prove live UI behavior.
 The CI audio dependency is built from pinned upstream RNNoise v1.21.

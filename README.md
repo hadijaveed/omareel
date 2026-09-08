@@ -42,6 +42,9 @@ upload it, or copy its link or path:
 - **Voice clean-up.** RNNoise reduces noise, with a small, time-aligned
   natural component to preserve speech detail. Neutral EQ and two-pass
   loudness normalisation keep the result consistent.
+- **Optional Studio finishing** (development branch): three simple looks,
+  backgrounds, frames and fixed zoom. Off by default; exports a separate copy
+  and leaves your recorded audio alone. [Studio guide](docs/studio-mode.md).
 - **Instant playback for viewers.** The MP4 index is moved to the front so
   browsers start playing immediately and seek with range requests.
 - **Share only what you choose.** After Stop the banner offers **Upload**;

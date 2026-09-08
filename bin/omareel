@@ -24,6 +24,7 @@
 #   omareel config get | merge '<json>'  # read / deep-merge omareel.json
 #   omareel remote save|status|test      # upload credentials -> rclone.conf
 #   omareel finalize <raw.mp4> [out.mp4]
+#   omareel studio preview|export|select last|<video.mp4> ['<style-json>']
 #   omareel setup [--link]               # deps, denoise models, ~/.local/bin link
 
 set -uo pipefail
@@ -76,6 +77,7 @@ default_config() {
   "vadRetroactiveMs": 50,
   "desktopMix": 0.5,
   "keepRaw": true,
+  "studio": { "enabled": false, "style": {} },
   "upload": {
     "auto": false,
     "provider": "none",
@@ -169,7 +171,7 @@ set_state() {
   # target/timer while processing and the URL when done.
   jq -n "${args[@]}" --argjson prev "$previous" \
     '($prev | {id, target, targetKind, region, file, startedAt, stoppedAt, url, title,
-      webcamSize, webcamShape, webcamPosition, webcamZoom}) + '"$filter" \
+      webcamSize, webcamShape, webcamPosition, webcamZoom, studioEnabled}) + '"$filter" \
     >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
@@ -611,6 +613,13 @@ rename_recording() {
     log "rename $(basename "$file") -> $(basename "$new")"
   fi
   index_patch "$file" '.file = $new | .title = $title' --arg new "$new" --arg title "$title"
+  # Styled variants continue to find the source after an original is renamed.
+  local index_path="$dir/$INDEX_FILE_NAME"
+  if [[ -f $index_path ]]; then
+    jq -c --arg old "$file" --arg new "$new" \
+      'if .studio.original? == $old then .studio.original = $new else . end' \
+      "$index_path" >"$index_path.tmp" && mv "$index_path.tmp" "$index_path"
+  fi
   if [[ -f $STATE_FILE && $(state_get file) == "$file" ]]; then
     jq --arg f "$new" --arg t "$title" '.file = $f | .title = $t' "$STATE_FILE" >"$STATE_FILE.tmp" &&
       mv "$STATE_FILE.tmp" "$STATE_FILE"
@@ -627,6 +636,10 @@ cmd_start() {
   denoise=$(cfg .denoise true)
   upload=none
   [[ $(cfg '.upload.auto' false) == true ]] && upload_ready && upload=rclone
+  # Snapshot at Start; Studio takes are always reviewed before sharing.
+  local studio_enabled
+  studio_enabled=$(cfg .studio.enabled false)
+  [[ $studio_enabled != true ]] || upload=none
 
   local arg
   for arg in "$@"; do
@@ -828,7 +841,7 @@ cmd_start() {
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload" mic="$mic" desktop="$desktop" \
     webcamSize="$webcam_size" webcamShape="$webcam_shape" \
-    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom"
+    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom" studioEnabled="$studio_enabled"
 }
 
 compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check "$CONFIG_FILE" "$@"; }
@@ -923,6 +936,8 @@ cmd_stop() {
   set_state done file="$final" url="$url" progress=100 canUpload="$can_upload" warning="$processing_warning"
   if [[ -n $url ]]; then
     notify -u normal -t 10000 --image "$thumb" "Omareel link copied" "$url" --exec xdg-open "$url"
+  elif [[ $(state_get studioEnabled) == true ]]; then
+    notify -u normal -t 10000 --image "$thumb" "Omareel Studio ready" "Original saved · choose a look, then export or use the original" --exec omarchy-shell omareel show
   elif [[ ${upload:-none} != none ]]; then
     notify -u critical -t 10000 --image "$thumb" "Omareel saved, upload failed" "$final" --exec mpv -- "$final"
   elif [[ $can_upload == true ]]; then
@@ -1513,6 +1528,76 @@ append_index() {
 
 # ---------------------------------------------------------------- upload ---
 
+# Studio never changes capture/audio processing or uploads automatically.
+# A new export gets its own index identity, so sharing cannot overwrite the
+# original cloud object. Failed renders leave both saved state and input alone.
+cmd_studio() (
+  local action="${1:-defaults}" file result exported entry title can_upload=false url style="${3:-}" original_warning=""
+  local saved_state="" result_file="" render_pid=""
+  [[ -n $style ]] || style='{}'
+  [[ $action != defaults ]] || { python3 "$PLUGIN_DIR/bin/studio.py" defaults; return; }
+  case "$action" in preview | export | select) ;; *) echo "studio: expected preview, export or select" >&2; return 2;; esac
+  file=$(resolve_recording "${2:-last}") || return 1
+  [[ $(state_get file) != "$file" ]] || original_warning=$(state_get warning)
+  if [[ $action != select ]]; then
+    local original
+    original=$(index_entry "$file" | jq -r '.studio.original // empty')
+    if [[ -n $original ]]; then
+      file=$(resolve_recording "$original") || {
+        echo "Studio original is missing. Restore it to restyle this export; the existing export is safe." >&2
+        return 1
+      }
+    fi
+  fi
+  if [[ $action == preview ]]; then
+    python3 "$PLUGIN_DIR/bin/studio.py" preview "$file" "$style"
+    return
+  fi
+  if [[ $action == export ]]; then
+    saved_state=$(mktemp "$RUNTIME_DIR/studio-state.XXXXXX") || return 1
+    if [[ -f $STATE_FILE ]]; then
+      cp -- "$STATE_FILE" "$saved_state" || { rm -f -- "$saved_state"; return 1; }
+    else
+      printf '{"phase":"idle"}' >"$saved_state"
+    fi
+    trap '
+      if [[ -n $render_pid ]]; then kill -TERM "$render_pid" 2>/dev/null || true; wait "$render_pid" 2>/dev/null || true; fi
+      if [[ -n $saved_state ]]; then mv -- "$saved_state" "$STATE_FILE"; omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true; fi
+      [[ -z $result_file ]] || rm -f -- "$result_file"
+    ' EXIT
+    trap 'exit 130' INT TERM
+    result_file=$(mktemp "$RUNTIME_DIR/studio-result.XXXXXX") || return 1
+    set_state processing file="$file" progress=0 studioExport=true || return 1
+    python3 "$PLUGIN_DIR/bin/studio.py" export "$file" "$style" >"$result_file" &
+    render_pid=$!
+    local code=0
+    wait "$render_pid" || code=$?
+    render_pid=""
+    ((code == 0)) || return "$code"
+    result=$(cat "$result_file")
+    exported=$(jq -er .file <<<"$result") || return 1
+    title=$(index_entry "$file" | jq -r '.title // empty')
+    [[ -n $title ]] || title=$(basename "${file%.mp4}")
+    append_index "$exported" "" "$(basename "${exported%.mp4}")" "$title — Studio" || {
+      echo "Export saved at $exported, but the library could not be updated." >&2; return 1;
+    }
+    # Index metadata follows renames; no fragile filename-based sidecars.
+    index_patch "$exported" '.studio = $studio' --argjson studio "$(jq '{original, options}' <<<"$result")" || return 1
+    file="$exported"
+    make_thumbnail "$file" "${file%.mp4}.jpg"
+  fi
+  entry=$(index_entry "$file")
+  [[ -n $entry ]] || entry='{}'
+  url=$(jq -r '.url // empty' <<<"$entry")
+  title=$(jq -r '.title // empty' <<<"$entry")
+  [[ -n $url ]] || { upload_ready && can_upload=true; }
+  set_state done file="$file" url="$url" title="$title" canUpload="$can_upload" progress=100 \
+    warning="$original_warning" studioEnabled=false || return 1
+  if [[ -n $saved_state ]]; then rm -f -- "$saved_state"; saved_state=""; fi
+  printf '%s' "${url:-$file}" | wl-copy 2>/dev/null || true
+  jq -nc --arg file "$file" '{file:$file}'
+)
+
 html_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' <<<"$1"; }
 
 # Served as text/html, inline — chat apps (Slack, Teams…) then unfurl it as a
@@ -1978,7 +2063,7 @@ remote)
       env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
   fi
   ;;
-start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link)
+start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link | studio)
   if [[ ${OMAREEL_OPERATION_LOCKED:-0} != 1 ]]; then
     exec flock --nonblock --conflict-exit-code 75 --close "$RUNTIME_DIR/operation.lock" \
       env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
@@ -1993,7 +2078,7 @@ jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 || {
 }
 
 case "${1:-}" in
-upload | rename | page | finalize | setup | link)
+upload | rename | page | finalize | setup | link | studio)
   case "$(current_phase)" in
   picking | starting | recording | processing | uploading)
     echo "Finish the current recording before changing or sharing a saved take." >&2
@@ -2037,6 +2122,7 @@ finalize)
   [[ -n ${2:-} ]] || { usage; exit 2; }
   finalize_video "$2" "${3:-${2%.raw.mp4}.mp4}" "$(cfg .denoise true)"
   ;;
+studio) shift; cmd_studio "$@" ;;
 upload) shift; cmd_upload "$@" ;;
 page) shift; cmd_page "$@" ;;
 rename) shift; cmd_rename "$@" ;;

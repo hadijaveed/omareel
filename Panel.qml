@@ -44,7 +44,8 @@ Item {
   readonly property bool directWindow: state && String(state.targetKind || "") === "window-direct"
 
   readonly property bool showControls: !dismissed
-    && ((recording && !wholeScreen && !directWindow) || busy || finished)
+    && ((recording && !wholeScreen && !directWindow) || (busy && state.studioExport !== true)
+        || (finished && state.studioEnabled !== true))
 
   // Shell routing contract (summon / hide / toggle).
   readonly property bool opened: showControls
