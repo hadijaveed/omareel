@@ -364,7 +364,6 @@ start_webcam() {
   local shape="${5:-$(cfg .webcamShape frame)}"
   local position="${6:-$(webcam_position)}"
   local zoom="${7:-$(cfg .webcamZoom full)}"
-  local capture_only="${8:-false}"
   cleanup_webcam # an orphaned capture from a crashed run would hold the camera
   formats=$(timeout 5 v4l2-ctl --list-formats-ext -d "$device" 2>/dev/null) || return 1
   mode=$(python3 "$PLUGIN_DIR/bin/system-check.py" camera <<<"$formats") || return 1
@@ -372,17 +371,6 @@ start_webcam() {
   fps=$(jq -r '.fps' <<<"$mode")
   input=(-input_format "$(jq -r '.format' <<<"$mode")")
   log "camera negotiated $device: $size at $fps fps ($(jq -r .format <<<"$mode"))"
-
-  if [[ $capture_only == true ]]; then
-    # Click-zoom takes keep the camera separate from the KMS screen. Compose
-    # it above the zoom afterward, so it never grows, duplicates or vanishes.
-    ffmpeg -y -v warning -f v4l2 "${input[@]}" -framerate "$fps" -video_size "$size" \
-      -use_wallclock_as_timestamps 1 -i "$device" -map 0:v \
-      -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts \
-      "$out" >>"$LOG_FILE" 2>&1 &
-    echo $! >"$CAM_PID_FILE"
-    return 0
-  fi
 
   # Self-view shape: crop to the shape's aspect, then a pre-rendered alpha
   # mask (alphamerge is a plane copy; a per-frame geq mask ran at 14 fps).
@@ -782,8 +770,8 @@ cmd_start() {
   # The camera starts first: it needs ~1 s to warm up, and the extra footage
   # before the recording starts is trimmed by finalize.
   local id raw cam_device webcam_size webcam_shape webcam_position_value webcam_zoom
-  local separate_camera=false
-  [[ $click_zoom == true && $webcam == true ]] && separate_camera=true
+  # Use the same live self-view in Studio and normal recording. Direct KMS
+  # includes that bubble in the screen; click zoom applies to the whole image.
   id=$(new_id)
   raw="$output_dir/$id.raw.mp4"
   webcam_size=$(cfg .webcamSize medium)
@@ -794,7 +782,7 @@ cmd_start() {
   if [[ $webcam == true ]]; then
     if cam_device=$(webcam_device "$(cfg .webcamDevice auto)"); then
       if ! start_webcam "$cam_device" "${raw%.raw.mp4}.cam.mp4" "$region" \
-        "$webcam_size" "$webcam_shape" "$webcam_position_value" "$webcam_zoom" "$separate_camera" \
+        "$webcam_size" "$webcam_shape" "$webcam_position_value" "$webcam_zoom" \
         || ! wait_webcam_capture "$cam_device" "${raw%.raw.mp4}.cam.mp4"; then
         cleanup_webcam
         start_error "Camera could not start. Close apps using it, choose another camera, or turn Camera off."
@@ -885,7 +873,7 @@ cmd_start() {
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload" mic="$mic" desktop="$desktop" \
     webcamSize="$webcam_size" webcamShape="$webcam_shape" \
     webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom" studioEnabled="$studio_enabled" \
-    zoomOnClicks="$click_zoom" studioCameraSeparate="$separate_camera"
+    zoomOnClicks="$click_zoom" studioCameraSeparate=false
 }
 
 compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check "$CONFIG_FILE" "$@"; }

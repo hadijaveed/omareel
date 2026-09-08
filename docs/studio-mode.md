@@ -27,11 +27,11 @@ not included in uploads. Existing recordings have no click history: record a
 new take with the toggle on. Area, Screen and direct Window capture are supported;
 the optional portal Window mode needs the toggle off.
 
-With the camera enabled, this mode records it as a separate layer and keeps it
-in its chosen corner during zooms. Its floating self-view is hidden during
-capture to keep it out of the screen layer. The normal saved original and Studio
-export both include the camera. Keep the `.studio-screen.mp4` and
-`.studio-camera.mp4` companion files to restyle these takes later.
+The camera self-view stays visible while recording, just as it does with Studio
+off. It is part of the captured screen, so exported click zooms also zoom the
+camera and can temporarily crop it out. The original keeps the full picture.
+Older takes recorded with separate camera layers still support a fixed camera
+in exports; keep their `.studio-screen.mp4` and `.studio-camera.mp4` companions.
 
 You can also choose **Style** on a saved recording, even with Studio mode off.
 Closing Studio does not discard the video. Closing during export lets the job
