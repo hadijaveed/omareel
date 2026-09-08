@@ -6,7 +6,7 @@ import qs.Ui
 import "Omareel.js" as Omareel
 
 // Bar launcher for Omareel: a record glyph (with a live timer while recording)
-// that opens a Loom-style start panel — pick Area / Window / Screen, choose
+// that opens the recording panel — pick Area / Window / Screen, choose
 // microphone, system-audio source and webcam, flip noise removal and upload,
 // and a settings page (gear) for recording quality and the upload destination
 // (Cloudflare R2, AWS S3, Backblaze B2, any S3 endpoint, or an existing
@@ -557,7 +557,7 @@ Panel {
                 }
                 Text {
                   textFormat: Text.PlainText
-                  text: root.idle ? "Record a video and share a link" : Omareel.statusText(root.state, root.nowSec)
+                  text: root.idle ? "Record, style, and share a demo" : Omareel.statusText(root.state, root.nowSec)
                   color: Color.popups.text
                   opacity: 0.65
                   font.family: Style.font.family

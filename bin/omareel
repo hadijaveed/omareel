@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# omareel — Loom-style screen recording for Omarchy.
+# omareel — screen recording and Studio finishing for Omarchy.
 #
 #   record area / window / screen with gpu-screen-recorder (GPU encode),
 #   optional webcam bubble, chosen microphone + system-audio source

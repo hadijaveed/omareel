@@ -1,6 +1,7 @@
 # Studio mode
 
-Development feature, not yet part of the published marketplace release.
+0.9.3 development preview, not yet part of the published marketplace release.
+See the [laptop test and release plan](0.9.3-testing.md).
 
 Studio is a small finishing step, not a timeline editor. The normal recording
 workflow stays the default. It adds no packages beyond the existing Python and

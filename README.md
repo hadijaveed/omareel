@@ -1,66 +1,103 @@
 # Omareel
 
-Loom-style screen recording for [Omarchy](https://omarchy.org). Record an
-**area**, a **window**, or your **screen** with an optional camera frame and
-the microphone you choose, get the background noise removed, and decide per
-video whether it stays local or goes up as a shareable link, with a title.
+**Polished product demos, made on Omarchy.**
+
+Show what you built. Walk someone through a fix. Turn a quick recording into
+something you want to share. Omareel records your screen, camera, and voice,
+then Studio gives it a finished look: smooth zooms on your clicks, a background,
+and a frame that fits your video.
+
+It lives in your Omarchy bar. Your recordings live on your machine. When you're
+ready to share, use your own storage and your own domain—no Omareel account or
+hosted subscription required. Storage providers may charge for their service.
+
+> **0.9.3 development preview · `feat/studio-mode`**
+> Studio is available on this testing branch. The public release is
+> [0.9.2](https://github.com/hadijaveed/omareel/releases/tag/v0.9.2), which does
+> not include Studio. We will submit 0.9.3 after 0.9.2 marketplace approval and
+> Studio testing on multiple laptops. [Testing and release plan](docs/0.9.3-testing.md).
+
+![A product walkthrough finished with Omareel's Midnight background, rounded frame, and soft shadow](docs/studio-midnight.png)
+
+*Example demo content, processed by the actual Studio exporter.
+[How these screenshots were captured](docs/screenshots/README.md).*
+
+## Record it. Give it a look. Make it yours.
+
+### Help people follow the important part
+
+Turn on **Zoom on clicks** before you record. Studio eases toward the place you
+click, then returns to the full view. No zoom timeline to manage. Leave the
+toggle off for an uninterrupted view of the screen.
 
 <p align="center">
-  <img src="docs/launcher.png" width="360" alt="Omareel launcher: Area / Window / Screen, microphone, system audio, camera bubble, noise removal, upload">
-  <img src="docs/settings.png" width="360" alt="Omareel settings: frame rate, quality, codec, noise removal engine, sharing destination">
+  <img src="docs/studio-midnight.png" width="440" alt="Full view before the example click">
+  <img src="docs/studio-click-zoom.png" width="440" alt="The same export zoomed toward the example click, making document details easier to read">
 </p>
 
-While recording an area, a small floating bar sits in a safe strip at the top
-or bottom of the screen:
+*Before the click → during the zoom. Frames from the same exported demo.*
+
+### A few choices that make a difference
+
+Choose **Midnight**, **Paper**, or **Minimal**, then export a styled copy.
+Adjust the background, spacing, frame, and shadow when you need to. Keep the
+original aspect ratio, or choose landscape, square, or portrait. Use a local
+image for your own background.
 
 <p align="center">
-  <img src="docs/recording-bar.png" width="430" alt="● 00:03 · Area 1600x900  Stop  Discard">
-  <br>
-  <img src="docs/done-bar.png" width="560" alt="✓ Saved · upload to share  Upload  Rename  Open  Copy">
+  <img src="docs/studio-editor.png" width="560" alt="Actual Omareel Studio editor with the Midnight preview, look selection, and Export styled copy action">
 </p>
 
-The Recordings page lists every take, newest first; click one to rename it,
-upload it, or copy its link or path:
+Your original stays in Recordings. Studio copies the recording's audio without
+processing it again, so changing the look doesn't change your voice.
+[See how Studio works](docs/studio-mode.md).
+
+### Your video. Your place to share it.
+
+Keep the MP4, send it yourself, or upload from Omareel to storage you control:
+Cloudflare R2, AWS S3, Backblaze B2, a compatible S3 server, or an existing rclone
+remote. With a public web address configured, Omareel uploads a player page and
+thumbnail alongside the video. Viewers open a link in their browser.
+
+You can use a domain you own by pointing it at your storage or CDN. Prefer to
+host it yourself? Connect your own S3-compatible storage with a browser-accessible
+URL. Omareel handles the upload; you run the storage and configure access.
+[Hosting and sharing](#sharing-setup) explains the choices and link behavior.
+
+Studio pauses automatic uploads so you can review the finished copy first.
+Recording, styling, and playback work locally; no cloud service is needed for
+that workflow once the required software and models are installed.
+
+## Made for your Omarchy desktop
+
+- **Start from the bar.** Record an area, a visible window, or your focused
+  screen with GPU encoding. Stop and save from the bar or a configured shortcut.
+- **Bring your camera.** Choose its size, shape, crop, and position. See yourself
+  while recording. Choose your microphone and optionally include system audio.
+- **Clean up your voice.** Natural, Clean, and Strong profiles offer different
+  balances of speech detail and noise removal. Test a short take with your mic.
+- **Finish in Studio.** Click zooms, three looks, custom backgrounds, frame and
+  canvas choices. Export a separate MP4; keep the original.
+- **Find and share your takes.** Rename, open, style, and upload from Recordings.
+  Choose what leaves your machine, with a player page hosted on your storage.
 
 <p align="center">
-  <img src="docs/recordings.png" width="360" alt="Recordings: Sprint demo · Today 13:08 · 0:03 · Local">
+  <img src="docs/studio-paper.png" width="720" alt="The same example demo exported with the Paper background and decorative application frame">
 </p>
 
-## What it does
+### Compatibility and the edges we're testing
 
-- **Record** an area (drag, or click a window to snap to it), a single visible
-  window through reliable fixed-region capture, or the focused monitor. An
-  optional portal mode keeps covered windows captured but is resize-sensitive.
-  GPU encoding through `gpu-screen-recorder`.
-- **Camera frame** in any corner of the recording: a rounded 16:9 frame
-  (the Loom look), a circle, or a portrait card, in four sizes, with supported V4L2 cameras.
-  It works the same way in every mode, like a screen studio: the camera is
-  recorded to its own file and a self-view floats in the corner where the
-  frame will be. Area, Screen, and reliable Window captures include that
-  self-view as-is; a portal Window capture draws the frame in after Stop.
-- **Pick your microphone** and your system-audio source from dropdowns.
-- **Voice clean-up.** RNNoise reduces noise, with a small, time-aligned
-  natural component to preserve speech detail. Neutral EQ and two-pass
-  loudness normalisation keep the result consistent.
-- **Optional Studio finishing** (development branch): three simple looks,
-  backgrounds, smooth shadows, and optional zoom on recorded clicks. Off by default; exports a separate copy
-  and leaves your recorded audio alone. [Studio guide](docs/studio-mode.md).
-- **Instant playback for viewers.** The MP4 index is moved to the front so
-  browsers start playing immediately and seek with range requests.
-- **Share only what you choose.** After Stop the banner offers **Upload**;
-  give the video a title and the link lands on your clipboard. Everything
-  else stays in `~/Videos/Omareel`. Flip *Upload every recording* in the
-  launcher if you would rather have every take uploaded automatically.
-- **Name your videos.** A recording is saved under a random UUID. Rename it
-  from the banner, the launcher, or the Recordings page and the mp4,
-  thumbnail and raw take move together (`Sprint demo: API v2` →
-  `Sprint-demo-API-v2.mp4`). The UUID stays the object key on the upload
-  destination, so links never change and are never guessable.
-- **Destinations:** Cloudflare R2, AWS S3, Backblaze B2, any S3-compatible
-  endpoint, or any rclone remote you already have. A small player page
-  (titled with your title) is uploaded next to the video.
-- **Configure everything from the bar**, including the upload credentials.
-  Credentials are written to rclone's own config file, never to the plugin's.
+Built for **Omarchy Quattro (4.0) and later**, on its Arch Linux, Hyprland, and
+Quickshell stack. Quattro 4.0.0 and 4.0.1 Stop controls have been tested; broader
+Studio and hardware coverage is tracked in the [0.9.3 test plan](docs/0.9.3-testing.md).
+Later releases remain the target and need rechecking when their APIs change.
+Other Arch desktops and Linux distributions are not currently supported.
+
+Click zoom works with Area, Screen, and direct Window recording. Optional
+portal Window capture needs click zoom off. The current camera self-view is
+part of the screen capture, so a zoom can temporarily crop it in the export.
+The editor shows a still-frame preview; check motion in the exported video.
+Studio currently exports SDR H.264 MP4 with a long edge up to 3840 pixels.
 
 ## Install
 
@@ -82,7 +119,7 @@ names alone. It checks the desktop connection, FFmpeg filters/encoders, recorder
 options, GPU info, output storage, and the enabled inputs. A successful probe
 does **not** replace a short real recording on a new laptop.
 
-### First recording
+### Install the public release (0.9.2)
 
 ```bash
 omarchy plugin add https://github.com/hadijaveed/omareel.git --enable
@@ -127,6 +164,12 @@ If the selected camera cannot start, the take does not silently continue
 without it: choose another device, close the app using it, or turn Camera off.
 Stepwise-only, unsupported compressed formats, and non-V4L2 cameras are not
 currently supported. Audio quality still depends on the microphone and room.
+
+### Testing Studio before 0.9.3
+
+The installation command above follows public `main` and does not install Studio.
+For this branch, use the [development installation and test plan](docs/0.9.3-testing.md).
+The plan also explains how to retain your settings and return to 0.9.2.
 
 ### Updates and removal
 
@@ -216,12 +259,25 @@ terminal in the recording desktop session (this does not require the CLI link):
 ~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel stop
 ```
 
-Version 0.9.2 uses Quickshell's native argument-array launcher for button actions,
+The 0.9.2 compatibility fix is included here. It uses Quickshell's native argument-array launcher for button actions,
 including Stop, instead of the newer Omarchy `Util.execArgv` helper. This keeps
 those actions compatible with Quattro 4.0.0 and newer shells. Restart the shell
 after upgrading if an old widget remains loaded, once the recording is saved.
 
 ## Sharing setup
+
+No Omareel server is required. The built-in sharing flow publishes static files
+(the video, thumbnail, and player page) to your chosen destination. It does not
+provision a server, register a domain, or manage storage permissions for you.
+For your own S3-compatible server, configure an endpoint for authenticated
+uploads and a public HTTPS base URL for browser playback. For a custom domain,
+configure DNS, TLS, and delivery on your storage or CDN first, then enter that
+base URL in Omareel. Use **Test upload** to check both storage and playback access.
+
+A public player link is viewable by anyone who has it. Passwords, team accounts,
+comments, and viewer analytics are not built into Omareel's player. For a private
+workflow, keep the video local or use your provider's supported temporary links.
+
 
 Open the gear, choose a destination, fill in the fields, **Save
 credentials**, then **Test upload**. The test uploads a unique tiny probe,
@@ -394,6 +450,7 @@ omareel doctor                       # JSON: deps, active denoiser, upload state
 omareel config get | merge '<json>'  # read / deep-merge omareel.json
 omareel remote save|status|test      # upload credentials → rclone.conf
 omareel finalize <raw.mp4> [out.mp4]
+omareel studio preview|export|select last|<video.mp4> ['<style-json>']
 omareel setup [--link]
 
 omarchy-shell omareel open|close|toggle|settings|recordings|status|refresh

@@ -2,7 +2,11 @@
 
 ## Scope
 
-0.9.2 is an Omarchy 4 beta, not a promise of universal laptop compatibility.
+0.9.3 Studio is in development on `feat/studio-mode`. Release requires 0.9.2
+marketplace approval, testing on multiple physical laptops, and Hadi's approval.
+See the [candidate test plan](0.9.3-testing.md) and [positioning brief](positioning.md).
+
+0.9.2 remains the public Omarchy 4 beta, not a promise of universal laptop compatibility.
 Default fixed-region/window privacy behavior is intentionally unchanged.
 Fresh-machine fixtures are automated; actual GPU, camera, permissions,
 suspend/resume, monitor docking, and a real cloud account still need testing

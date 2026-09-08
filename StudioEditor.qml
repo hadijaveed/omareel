@@ -151,7 +151,7 @@ Column {
       font.pixelSize: Commons.Style.font.subtitle
     }
   }
-  Hint { text: "Give your recording a frame. Your original stays in Recordings." }
+  Hint { text: "Choose a look and export a copy. Your original stays in Recordings." }
   Hint { visible: root.recordingWarning !== ""; text: root.recordingWarning }
   Rectangle {
     width: parent.width

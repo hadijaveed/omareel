@@ -47,7 +47,7 @@ def main():
                               "__DEFAULTS__":studio.DEFAULTS,"__SCREENSHOT__":str(screenshot)}.items():
             template = template.replace(marker,json.dumps(value))
         (temp/"shell.qml").write_text(template)
-        env = dict(os.environ, QT_QPA_PLATFORM="offscreen",QT_QUICK_BACKEND="software",XDG_RUNTIME_DIR=directory,
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen",QT_QUICK_BACKEND="software",QT_QPA_PLATFORMTHEME="",XDG_RUNTIME_DIR=directory,
                    XDG_CACHE_HOME=str(temp/"cache"),OMAREEL_CONFIG=str(config),RCLONE_CONFIG=str(temp/"unused.conf"),
                    PATH=str(mocks)+os.pathsep+os.environ["PATH"])
         env.pop("OMAREEL_OPERATION_LOCKED",None)

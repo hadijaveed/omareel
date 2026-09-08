@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "hadijaveed.omareel",
   "name": "Omareel",
-  "version": "0.9.2",
+  "version": "0.9.3-dev",
   "author": "hadijaveed",
   "homepage": "https://github.com/hadijaveed/omareel",
-  "description": "Loom-style screen recording for Omarchy: record an area, window, or screen with a webcam bubble and your chosen mic, clean up the audio, upload to R2/S3/B2, and copy a share link. Floating controls while recording plus a bar launcher with in-widget settings.",
+  "description": "Make polished product demos on Omarchy. Record your screen and camera, zoom on clicks, and finish with Studio backgrounds and frames. Keep the MP4 locally or share a player page from your own storage.",
   "kinds": [
     "panel",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omareel",
-    "description": "Record button with a live timer; opens the Omareel launcher and settings.",
+    "description": "Record, style, and share from the Omarchy bar.",
     "category": "System",
     "aliases": ["omareel", "record", "screenrecord", "loom"],
     "allowMultiple": false,
