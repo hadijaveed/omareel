@@ -56,7 +56,10 @@ Item {
     if (finished) cliRun(["dismiss"])
   }
 
-  function cliRun(args) { Util.execArgv([root.cli].concat(args)) }
+  // Quickshell provides the argv-safe detached launcher directly.  Keep this
+  // independent of the Commons process helpers, which vary across Omarchy
+  // releases.
+  function cliRun(args) { Quickshell.execDetached([root.cli].concat(args)) }
 
   function promptTitle(action) {
     titleAction = action
@@ -262,7 +265,7 @@ Item {
           text: "Open"
           onClicked: {
             var share = Omareel.shareTarget(root.state)
-            if (share) Util.execArgv(["xdg-open", share])
+            if (share) Quickshell.execDetached(["xdg-open", share])
           }
         }
         Button {

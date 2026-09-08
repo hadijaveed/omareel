@@ -66,7 +66,20 @@ Panel {
 
   // ---- actions ------------------------------------------------------------
 
-  function cliRun(args) { Util.execArgv([root.cli].concat(args)) }
+  // Use Quickshell's stable argv-safe launcher directly.  The old Commons
+  // helper is absent from some Omarchy releases, which made every action button
+  // (including Stop) fail at runtime.
+  function cliRun(args) { Quickshell.execDetached([root.cli].concat(args)) }
+
+  // Omarchy deliberately does not run third-party install hooks.  Activate
+  // the CLI after the enabled widget first loads so keybindings always point
+  // at this checkout.  The command is idempotent and never overwrites an
+  // unrelated executable.
+  Process {
+    id: activateProc
+    command: [root.cli, "activate"]
+    running: true
+  }
 
   function start(kind) {
     if (root.busy || root.recording) return
@@ -627,7 +640,7 @@ Panel {
                 text: "Open"
                 onClicked: {
                   var share = Omareel.shareTarget(root.state)
-                  if (share) Util.execArgv(["xdg-open", share])
+                  if (share) Quickshell.execDetached(["xdg-open", share])
                 }
               }
               Button {
@@ -993,13 +1006,13 @@ Panel {
                   Button {
                     iconText: "󰏌"
                     text: "Open"
-                    onClicked: Util.execArgv(["xdg-open", row.shared ? String(row.modelData.url) : String(row.modelData.file)])
+                    onClicked: Quickshell.execDetached(["xdg-open", row.shared ? String(row.modelData.url) : String(row.modelData.file)])
                   }
                   Button {
                     visible: row.shared
                     iconText: "󰈔"
                     text: "Play file"
-                    onClicked: Util.execArgv(["xdg-open", String(row.modelData.file)])
+                    onClicked: Quickshell.execDetached(["xdg-open", String(row.modelData.file)])
                   }
                 }
               }

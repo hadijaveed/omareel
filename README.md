@@ -86,8 +86,10 @@ omarchy plugin add https://github.com/hadijaveed/omareel.git --enable
 ~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel setup --link
 ```
 
-`setup` checks dependencies, downloads pinned, checksum-verified RNNoise models, and symlinks
-`omareel` into `~/.local/bin` so keybindings can call it. Then add a keybinding
+When the enabled bar widget first loads, it safely links its CLI at
+`~/.local/bin/omareel` and sends one **Omareel is ready** notification. It
+never overwrites an unrelated command. `setup` checks dependencies and
+downloads pinned, checksum-verified RNNoise models. Then add a keybinding
 in `~/.config/hypr/bindings.lua`:
 
 ```lua
@@ -127,7 +129,7 @@ currently supported. Audio quality still depends on the microphone and room.
 
 ```bash
 omarchy plugin update hadijaveed.omareel
-omareel setup --link
+omareel setup
 ```
 
 Stop recording/processing before updating. Settings, recordings and upload
@@ -136,8 +138,9 @@ installed plugin files: local modifications can prevent a fast-forward update.
 If the shell still displays an older launcher after an update, run
 `omarchy restart shell` once while no recording is active; this reloads the
 bar/panels without closing your applications.
-`setup --link` refuses to overwrite an unrelated command. If it reports a
-conflict, inspect and move that existing command aside yourself before retrying.
+Automatic CLI activation refuses to overwrite an unrelated command. If its
+notification reports a conflict, inspect and move that existing command aside
+yourself, then run `~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel link`.
 For removal, use `omarchy plugin remove hadijaveed.omareel`; your recordings,
 models, settings, credentials and optional CLI symlink are not deleted by us.
 Remove the now-dangling symlink manually if you no longer want it.
@@ -197,8 +200,23 @@ Screen mode captures the monitor's usable rectangle, excluding its reserved
 system bar. Other windows or notifications inside the selected region are
 visible in KMS recordings; keep the intended content in place.
 
-**Keyboard:** `omareel toggle` opens the launcher when idle and stops the
-recording when one is running.
+**Keyboard:** `Super+Shift+R` (when configured above) runs `omareel toggle`:
+it opens the launcher when idle and stops/saves the recording when one is
+running. This remains available if an on-screen control is obscured. If a
+recorder exits unexpectedly but leaves a non-empty raw take, Stop recovers it
+through the normal save pipeline instead of leaving the UI stuck.
+
+If the shell's Stop control cannot respond, run the backend directly from a
+terminal in the recording desktop session (this does not require the CLI link):
+
+```bash
+~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel stop
+```
+
+Version 0.9.2 uses Quickshell's native argument-array launcher for button actions,
+including Stop, instead of the newer Omarchy `Util.execArgv` helper. This keeps
+those actions compatible with Quattro 4.0.0 and newer shells. Restart the shell
+after upgrading if an old widget remains loaded, once the recording is saved.
 
 ## Sharing setup
 
