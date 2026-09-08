@@ -24,7 +24,7 @@
 #   omareel config get | merge '<json>'  # read / deep-merge omareel.json
 #   omareel remote save|status|test      # upload credentials -> rclone.conf
 #   omareel finalize <raw.mp4> [out.mp4]
-#   omareel setup [--link]               # deps, denoise models, ~/.local/bin link
+#   omareel setup [--link] | activate    # deps, models, or safe first-load link
 
 set -uo pipefail
 
@@ -841,17 +841,17 @@ start_error() {
 }
 
 cmd_stop() {
-  local phase
+  local phase recorder_running=false
   phase=$(current_phase)
-  if ! gsr_running; then
-    [[ $phase == recording ]] && reset_state
+  gsr_running && recorder_running=true
+  if [[ $recorder_running == false && $phase != recording ]]; then
     cleanup_webcam
     echo "not recording" >&2
     return 1
   fi
 
   local pid raw denoise upload mic desktop webcam_size webcam_shape webcam_position_value webcam_zoom
-  pid=$(cat "$PID_FILE")
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
   raw=$(state_get file)
   denoise=$(state_get denoise)
   upload=$(state_get upload)
@@ -868,15 +868,23 @@ cmd_stop() {
   [[ -n $webcam_position_value ]] || webcam_position_value=$(webcam_position)
   [[ -n $webcam_zoom ]] || webcam_zoom=$(cfg .webcamZoom full)
 
-  kill -INT "$pid" 2>/dev/null # SIGINT lets gsr write the moov atom
-  local count=0
-  while kill -0 "$pid" 2>/dev/null && ((count < 80)); do
-    sleep 0.1
-    ((count++))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -9 "$pid" 2>/dev/null
-    notify -u critical -t 5000 "Omareel recording error" "Recorder had to be force-killed; the video may be corrupted."
+  if [[ $recorder_running == true ]]; then
+    kill -INT "$pid" 2>/dev/null # SIGINT lets gsr write the moov atom
+    local count=0
+    while kill -0 "$pid" 2>/dev/null && ((count < 80)); do
+      sleep 0.1
+      ((count++))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null
+      notify -u critical -t 5000 "Omareel recording error" "Recorder had to be force-killed; the video may be corrupted."
+    fi
+  else
+    # The compositor, GPU driver, or shell may have ended the recorder before
+    # Stop ran. If its playable raw take exists, finish it through the normal
+    # save pipeline instead of leaving the UI stuck and the file orphaned.
+    notify -u normal -t 5000 "Omareel is recovering the recording" \
+      "The capture process already ended; saving the recorded video now."
   fi
   rm -f "$PID_FILE"
   cleanup_webcam
@@ -958,7 +966,7 @@ cmd_cancel() {
 }
 
 cmd_toggle() {
-  if gsr_running; then
+  if gsr_running || [[ $(current_phase) == recording ]]; then
     cmd_stop
   else
     case "$(current_phase)" in
@@ -1916,6 +1924,25 @@ cmd_link() {
   link_cli "$HOME/.local/bin/omareel"
 }
 
+# Called by the bar widget on load. Omarchy intentionally never executes
+# third-party install hooks, so make the command used by keybindings available
+# here. This is safe to repeat and link_cli refuses to replace another command.
+cmd_activate() {
+  local target="$HOME/.local/bin/omareel" already=false
+  [[ -L $target && $(readlink -f "$target" 2>/dev/null) == "$SELF" ]] && already=true
+
+  if ! link_cli "$target" >/dev/null; then
+    notify -u critical -t 8000 "Omareel setup needs attention" \
+      "Could not link $target. Open Omareel Settings → Setup for details."
+    return 1
+  fi
+
+  if [[ $already == false ]]; then
+    notify -u normal -t 8000 "Omareel is ready" \
+      "Click the bar button to record or stop. The omareel command is ready for keyboard shortcuts."
+  fi
+}
+
 link_cli() {
   local target="$1"
   mkdir -p "$(dirname "$target")" || return 1
@@ -1978,7 +2005,7 @@ remote)
       env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
   fi
   ;;
-start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link)
+start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link | activate)
   if [[ ${OMAREEL_OPERATION_LOCKED:-0} != 1 ]]; then
     exec flock --nonblock --conflict-exit-code 75 --close "$RUNTIME_DIR/operation.lock" \
       env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
@@ -2017,6 +2044,7 @@ last) cmd_last ;;
 open) cmd_open ;;
 setup) shift; cmd_setup "$@" ;;
 link) cmd_link ;;
+activate) cmd_activate ;;
 config)
   case "${2:-get}" in
   get) cat "$CONFIG_FILE" ;;

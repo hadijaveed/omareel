@@ -23,6 +23,17 @@ class WorkflowRegression(unittest.TestCase):
         rclone_conf.write_text("[fixture]\ntype = s3\n")
         self.env = dict(os.environ, OMAREEL_CONFIG=str(self.config), XDG_RUNTIME_DIR=self.tmp.name,
                         RCLONE_CONFIG=str(rclone_conf))
+        # Upload execution is mocked by each test. Its configuration probe
+        # runs in Python, so provide the same fixture across that boundary too.
+        # Workflow tests must not depend on a real rclone installation.
+        mocks = self.root / "mockbin"
+        mocks.mkdir()
+        rclone = mocks / "rclone"
+        rclone.write_text("#!/bin/sh\nif [ \"$1\" = listremotes ]; then\n"
+                          "  printf '%s\\n' '[{\"name\":\"fixture\",\"type\":\"s3\"}]'\n"
+                          "else exit 1; fi\n")
+        rclone.chmod(0o700)
+        self.env["PATH"] = str(mocks) + os.pathsep + self.env["PATH"]
         self.runtime = self.root / "omareel"
         self.runtime.mkdir()
         self.env.pop("OMAREEL_OPERATION_LOCKED", None)
@@ -66,6 +77,34 @@ class WorkflowRegression(unittest.TestCase):
     def test_stale_pid_is_not_a_recorder(self):
         (self.runtime / "gsr.pid").write_text(str(os.getpid()))
         self.assertNotEqual(self.helper("gsr_running", check=False).returncode, 0)
+
+    def test_stop_recovers_an_orphaned_raw_recording(self):
+        raw = self.root / "orphan.raw.mp4"
+        raw.write_bytes(self.video().read_bytes())
+        (self.runtime / "gsr.pid").write_text(str(os.getpid()))
+        (self.runtime / "state.json").write_text(json.dumps({
+            "phase": "recording", "file": str(raw), "denoise": False,
+            "upload": "none", "mic": False, "desktop": False,
+        }))
+        result = self.helper('''
+cleanup_webcam(){ :; }
+kill(){ echo UNEXPECTED_SIGNAL >&2; return 1; }
+upload_ready(){ return 1; }
+wl-copy(){ cat >/dev/null; }
+cmd_stop
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("UNEXPECTED_SIGNAL", result.stderr)
+        self.assertTrue((self.root / "orphan.mp4").exists())
+        self.assertEqual(json.loads((self.runtime / "state.json").read_text())["phase"], "done")
+        duration = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                           "-of", "csv=p=0", str(self.root / "orphan.mp4")], text=True)
+        self.assertGreater(float(duration), 0.7)
+
+    def test_toggle_recovers_a_recording_after_capture_process_exits(self):
+        (self.runtime / "state.json").write_text('{"phase":"recording"}')
+        result = self.helper('gsr_running(){ return 1; }; cmd_stop(){ echo RECOVER; }; cmd_menu(){ echo MENU; }; cmd_toggle')
+        self.assertEqual(result.stdout.strip(), "RECOVER")
 
     def test_window_clip_and_screen_exclude_reserved_bar(self):
         self.env["TEST_MONITORS"] = json.dumps([{"name": "DP-1", "x": 0, "y": 0,

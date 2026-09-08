@@ -98,6 +98,38 @@ gpu-screen-recorder(){ echo SHOULD_NOT_RUN; }; cmd_start area''')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(target.read_text(), "belongs to someone else")
 
+    def test_shell_actions_only_use_native_quickshell_process_api(self):
+        for name in ("BarWidget.qml", "Panel.qml"):
+            source = (ROOT / name).read_text()
+            self.assertNotIn("Util.execArgv", source)
+            self.assertIn("Quickshell.execDetached", source)
+
+    def test_activate_links_once_and_notifies_once(self):
+        home = self.path / "home"
+        bindir = home / ".local/bin"
+        env = dict(self.env, HOME=str(home), PATH=str(bindir) + os.pathsep + self.env["PATH"])
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; notify(){ echo "NOTICE:$*"; }; cmd_activate; cmd_activate',
+             "_", str(ROOT / "bin/omareel")],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((bindir / "omareel").resolve(), ROOT / "bin/omareel")
+        self.assertEqual(result.stdout.count("NOTICE:"), 1)
+
+    def test_activate_preserves_an_unrelated_command(self):
+        home = self.path / "home"
+        bindir = home / ".local/bin"
+        bindir.mkdir(parents=True)
+        target = bindir / "omareel"
+        target.write_text("unrelated command")
+        result = subprocess.run(["bash", "-c", 'source "$1"; notify(){ :; }; cmd_activate',
+                                 "_", str(ROOT / "bin/omareel")],
+                                env=dict(self.env, HOME=str(home), PATH=str(bindir)+os.pathsep+self.env["PATH"]),
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_text(), "unrelated command")
+
     def test_invalid_settings_are_not_replaced(self):
         self.config.write_text("broken JSON")
         result = subprocess.run([str(ROOT / "bin/omareel"), "status"], env=self.env, capture_output=True, text=True)
