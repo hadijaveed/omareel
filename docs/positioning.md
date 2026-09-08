@@ -7,32 +7,36 @@ finding, search-facing copy, distribution and measurement.
 
 ## The promise
 
-**Polished product demos, made on Omarchy.**
+**Record a walkthrough. Share a link. Add a little polish when you want it.**
 
 Omareel is for people building and explaining things on Omarchy: a feature
 walkthrough, a tutorial, a bug fix, or an update for a teammate. Start from the
 bar, record your screen and voice, then give the video a finished look in Studio.
 Share an MP4 or a link from storage you control.
 
-The headline leads with the result and the desktop. Studio is a reason to
-choose it; local files and independent hosting are reasons to trust the workflow.
-Avoid leading with codecs, denoiser names, or a comparison to Loom.
+Lead with the complete recording and sharing workflow: screen, camera, voice,
+Stop, saved video and a link. Show the actual recorder and saved-video controls
+first. Studio adds optional finishing for demos and tutorials. Local files and
+independent hosting apply to both workflows. “Loom-style” is a useful familiar
+reference, as long as the optional Studio capabilities are also clear.
+Avoid letting a generic styled sample replace the product's own interface or
+implying that every recording needs editing before it can be shared.
 
 ## Copy to reuse
 
 **Short description**
 
-Make polished product demos on Omarchy. Record your screen and camera, zoom on
-clicks, and finish with Studio backgrounds and frames. Keep the MP4 locally or
-share a player page from your own storage.
+Record your screen, camera and voice on Omarchy, then save the video or share a
+link from your own storage. Optional Studio finishing adds click zooms,
+backgrounds and frames when you want a more polished demo.
 
 **A little more room**
 
-You already have something worth showing. Omareel helps you show it clearly.
-Record a walkthrough from your Omarchy bar, let Studio zoom toward your clicks,
-and choose a background and frame that fit. Your original stays safe, and your
-voice isn't processed again when you style the video. Keep the result on your
-machine, send the MP4, or share a link using storage and a domain you control.
+Open Omareel from your bar, choose your screen, camera and microphone, and start
+explaining. Stop to save the video, give it a title, and share a link from storage
+you control. For a demo that needs a finished look, Studio adds click zooms,
+backgrounds and frames. It keeps your original and copies your audio unchanged.
+A quick update can go straight from recording to sharing.
 
 **Hosting copy**
 

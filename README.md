@@ -1,97 +1,124 @@
-# Omareel — screen recorder and Studio for Omarchy
+# Omareel — screen recording, sharing, and Studio for Omarchy
 
-**Polished product demos, made on Omarchy.**
+**Record a walkthrough. Share a link. Add a little polish when you want it.**
 
-[Install](#install) · [Studio preview](docs/0.9.3-testing.md) · [Hosting guide](docs/upload-providers.md)
+[Install](#install) · [Record and share](#record-and-share) · [Studio](#give-your-recording-a-studio-finish) · [Hosting guide](docs/upload-providers.md)
 
-Omareel is an open-source screen recording plugin for Omarchy, the Arch Linux
-desktop built on Hyprland. This project is maintained by
+Omareel is an open-source screen recorder for [Omarchy](https://omarchy.org).
+Record an **area**, a **window**, or your **screen** with your camera and chosen
+microphone. Clean up the background noise, save the video, and share a link
+from storage you control. It's a simple Loom-style workflow, right from your bar.
+
+For a product demo or tutorial that needs a finished look, turn on **Studio**:
+add click zooms, choose a background and frame, and export a styled copy.
+You can also leave Studio off and go straight from recording to sharing.
+
+No Omareel account or subscription is required. Keep your recordings locally,
+use your existing cloud bucket, or host the video and player page yourself.
+Storage providers may charge for their service. Maintained by
 [Hadi Javeed](https://github.com/hadijaveed) at
 [hadijaveed/omareel](https://github.com/hadijaveed/omareel).
 
-Show what you built. Walk someone through a fix. Turn a quick recording into
-something you want to share. Omareel records your screen, camera, and voice,
-then Studio gives it a finished look: smooth zooms on your clicks, a background,
-and a frame that fits your video.
+> **0.9.3 development preview.** The recording and sharing workflow is available
+> in [0.9.2](https://github.com/hadijaveed/omareel/releases/tag/v0.9.2).
+> Studio is being tested on this branch and is not yet published.
+> [Testing and release plan](docs/0.9.3-testing.md).
 
-It lives in your Omarchy bar. Your recordings live on your machine. When you're
-ready to share, use your own storage and your own domain—no Omareel account or
-hosted subscription required. Storage providers may charge for their service.
+## Record and share
 
-> **0.9.3 development preview · `feat/studio-mode`**
-> Studio is available on this testing branch. The public release is
-> [0.9.2](https://github.com/hadijaveed/omareel/releases/tag/v0.9.2), which does
-> not include Studio. We will submit 0.9.3 after 0.9.2 marketplace approval and
-> Studio testing on multiple laptops. [Testing and release plan](docs/0.9.3-testing.md).
+### Pick your screen, camera, and sound
 
-![A product walkthrough finished with Omareel's Midnight background, rounded frame, and soft shadow](docs/studio-midnight.png)
-
-*Example demo content, processed by the actual Studio exporter.
-[How these screenshots were captured](docs/screenshots/README.md).*
-
-## Record it. Give it a look. Make it yours.
-
-### Help people follow the important part
-
-Turn on **Zoom on clicks** before you record. Studio eases toward the place you
-click, then returns to the full view. No zoom timeline to manage. Leave the
-toggle off for an uninterrupted view of the screen.
+Open Omareel from the bar and choose Area, Window, or Screen. Select your
+microphone, optionally include system audio, and choose your camera's size,
+shape, crop, and position. Voice clean-up helps reduce background noise.
+Settings cover recording quality and your sharing destination.
 
 <p align="center">
-  <img src="docs/studio-midnight.png" width="440" alt="Full view before the example click">
-  <img src="docs/studio-click-zoom.png" width="440" alt="The same export zoomed toward the example click, making document details easier to read">
+  <img src="docs/launcher.png" width="340" alt="Omareel recorder with Area, Window and Screen capture, microphone, system audio, camera, noise removal and upload controls">
+  <img src="docs/settings.png" width="340" alt="Omareel recording settings and optional sharing destination">
 </p>
 
-*Before the click → during the zoom. Frames from the same exported demo.*
+*Recorder and settings screenshots from an earlier build. The current Studio
+editor is shown below; labels and layout have evolved.*
 
-### A few choices that make a difference
+### Stop, save, and decide what to share
 
-Choose **Midnight**, **Paper**, or **Minimal**, then export a styled copy.
-Adjust the background, spacing, frame, and shadow when you need to. Keep the
-original aspect ratio, or choose landscape, square, or portrait. Use a local
-image for your own background. Your adjustments are remembered automatically
-for the next video, including frame, spacing, shadow, and canvas.
+During an Area recording, a small floating bar gives you a timer and Stop.
+For Window and Screen recordings, use the Omareel timer in the system bar or
+your configured keyboard shortcut.
 
 <p align="center">
-  <img src="docs/studio-editor.png" width="560" alt="Actual Omareel Studio editor with the Midnight preview, look selection, and Export styled copy action">
+  <img src="docs/recording-bar.png" width="430" alt="Floating recording controls with elapsed time, selected area, Stop and discard">
 </p>
 
-Your original stays in Recordings. Studio copies the recording's audio without
-processing it again, so changing the look doesn't change your voice.
-[See how Studio works](docs/studio-mode.md).
-
-### Your video. Your place to share it.
-
-Keep the MP4, send it yourself, or upload from Omareel to storage you control:
-Cloudflare R2, AWS S3, Backblaze B2, a compatible S3 server, or an existing rclone
-remote. With a public web address configured, Omareel uploads a player page and
-thumbnail alongside the video. Viewers open a link in their browser.
-
-You can use a domain you own by pointing it at your storage or CDN. Prefer to
-host it yourself? Connect your own S3-compatible storage with a browser-accessible
-URL. Omareel handles the upload; you run the storage and configure access.
-[Hosting and sharing](#sharing-setup) explains the choices and link behavior.
-
-Studio pauses automatic uploads so you can review the finished copy first.
-Recording, styling, and playback work locally; no cloud service is needed for
-that workflow once the required software and models are installed.
-
-## Made for your Omarchy desktop
-
-- **Start from the bar.** Record an area, a visible window, or your focused
-  screen with GPU encoding. Stop and save from the bar or a configured shortcut.
-- **Bring your camera.** Choose its size, shape, crop, and position. See yourself
-  while recording. Choose your microphone and optionally include system audio.
-- **Clean up your voice.** Natural, Clean, and Strong profiles offer different
-  balances of speech detail and noise removal. Test a short take with your mic.
-- **Finish in Studio.** Click zooms, three looks, custom backgrounds, frame and
-  canvas choices. Export a separate MP4; keep the original.
-- **Find and share your takes.** Rename, open, style, and upload from Recordings.
-  Choose what leaves your machine, with a player page hosted on your storage.
+After Stop, the recording is saved on your machine. Give it a title, **Upload**
+it to get a shareable link, **Open** it to check playback, or **Copy** its path
+or existing link. With Studio off, you can optionally enable automatic uploads.
+There is no editing step required to send a quick update.
 
 <p align="center">
-  <img src="docs/studio-paper.png" width="720" alt="The same example demo exported with the Paper background and decorative application frame">
+  <img src="docs/done-bar.png" width="640" alt="Saved recording actions: Upload, rename, Open, Copy and close">
 </p>
+
+### Come back to any recording
+
+Your takes stay in **Recordings**. Find a previous video, rename it, open it,
+upload it, or copy its link or local path. The Studio branch also adds **Style**
+for giving an existing recording a finished look.
+
+<p align="center">
+  <img src="docs/recordings.png" width="400" alt="Omareel Recordings library showing saved local videos with their titles, times and durations">
+</p>
+
+## Share from a place you control
+
+Send the MP4 yourself, or let Omareel upload to Cloudflare R2, AWS S3, Backblaze
+B2, your own S3-compatible server, or an existing rclone remote. With a public
+playback URL configured, Omareel uploads a player page and thumbnail alongside
+the video. Viewers open a link in their browser.
+
+Use a domain you own by configuring it on your storage or CDN. Omareel handles
+the upload; you choose the storage and configure access. You can also keep
+everything local. [Hosting and sharing](#sharing-setup) explains the options.
+
+## Give your recording a Studio finish
+
+**Optional in the 0.9.3 development preview.** Start with the same recorder,
+then use Studio when you want click zooms, a background, and a frame. Your
+original stays in Recordings, and Studio exports a separate MP4.
+
+<p align="center">
+  <img src="docs/studio-editor.png" width="560" alt="Actual Omareel Studio editor with a frame preview, look selection, adjustments and Export styled copy">
+</p>
+
+### Zoom where you click
+
+Enable **Zoom on clicks** before recording. The styled export eases toward the
+place you click, then returns to the full view. No zoom timeline to manage.
+Leave it off for an uninterrupted view of the screen.
+
+<p align="center">
+  <img src="docs/studio-midnight.png" width="400" alt="Studio example before a click, showing the full recording inside a Midnight frame">
+  <img src="docs/studio-click-zoom.png" width="400" alt="The same Studio export during a click zoom, making the selected area easier to read">
+</p>
+
+*Before the click → during the zoom. Example content rendered by the actual
+Studio exporter. [Screenshot details](docs/screenshots/README.md).*
+
+### Choose a look and make it yours
+
+Choose **Midnight**, **Paper**, or **Minimal**. Adjust the background, spacing,
+frame, and shadow; use a local image for your own background. Keep the original
+aspect ratio, or choose landscape, square, or portrait. Your preferences save
+automatically for the next video.
+
+<p align="center">
+  <img src="docs/studio-paper.png" width="600" alt="Example recording exported with the Paper background and decorative application frame">
+</p>
+
+Studio copies your recorded audio without processing it again. Automatic
+uploads pause while you review the Studio take; export your copy, check it,
+then choose Upload. [Studio guide](docs/studio-mode.md).
 
 ### Compatibility and the edges we're testing
 
