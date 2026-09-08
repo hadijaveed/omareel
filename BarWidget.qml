@@ -33,6 +33,7 @@ Panel {
   property int nowSec: Math.floor(Date.now() / 1000)
 
   property string page: "launcher" // launcher | settings | recordings | studio
+  onPageChanged: contentViewport.contentY = 0
   property var recordings: []       // index.jsonl, newest first
   property string selectedFile: ""  // expanded row on the recordings page
   property string draftName: ""     // rename field on the recordings page
@@ -712,6 +713,15 @@ Panel {
             }
           }
 
+          PlainToggle {
+            visible: root.idle || root.finished
+            width: parent.width
+            label: "Studio mode"
+            description: "After Stop, choose a background and frame, then export a styled copy."
+            checked: root.studioOn
+            onClicked: root.setConfig("studio.enabled", !root.studioOn)
+          }
+
           // Sources
           Heading { visible: root.idle || root.finished; text: "Sources" }
           Column {
@@ -861,13 +871,6 @@ Panel {
               ]
               value: String(Omareel.get(root.config, "denoiseStrength", "normal"))
               onChanged: function(v) { root.setConfig("denoiseStrength", v) }
-            }
-            PlainToggle {
-              width: parent.width
-              label: "Studio mode"
-              description: "Off by default. After Stop: preview a background and frame, then choose what to share."
-              checked: root.studioOn
-              onClicked: root.setConfig("studio.enabled", !root.studioOn)
             }
             PlainToggle {
               width: parent.width

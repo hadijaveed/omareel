@@ -111,6 +111,59 @@ class StudioRegression(unittest.TestCase):
         self.assertEqual(self.packets(result["file"]),[])
         self.assertLess(result["width"],result["height"])
 
+    def test_timed_click_zoom_changes_only_its_range_and_preview_matches(self):
+        still = self.path / "static.mp4"
+        self.ffmpeg("-f","lavfi","-i","testsrc=size=640x360:rate=10:duration=4",
+                    "-f","lavfi","-i","sine=frequency=440:sample_rate=48000:duration=4",
+                    "-vf","setpts=PTS-STARTPTS","-c:v","libx264","-pix_fmt","yuv420p",
+                    "-c:a","aac","-shortest",str(still))
+        event = dict(start=.5,end=2.5,amount=2,x=.85,y=.2)
+        opts = dict(zooms=[event],previewTime=1.5)
+        output = Path(self.render(opts=opts, source=still)["file"])
+        plain = Path(self.render(source=still)["file"])
+        self.assertEqual(self.packets(output),self.packets(still))
+        self.assertAlmostEqual(studio.probe(output)["duration"],4,delta=.1)
+        def frame(path, at, preview_size=False):
+            args = ["-ss",str(at),"-i",str(path)]
+            if preview_size:
+                args += ["-vf","scale=960:640:force_original_aspect_ratio=decrease"]
+            return self.ffmpeg(*args,"-frames:v","1","-pix_fmt","rgb24","-f","rawvideo","-").stdout
+        def difference(a,b):
+            self.assertEqual(len(a),len(b))
+            return sum(abs(x-y) for x,y in zip(a,b))/len(a)
+        for at in (0,3):
+            self.assertLess(difference(frame(output,at),frame(plain,at)),3)
+        self.assertGreater(difference(frame(output,1.5),frame(plain,1.5)),15)
+        preview = Path(self.render("preview",opts,source=still)["file"])
+        self.assertLess(difference(frame(preview,0),frame(output,1.5,True)),4)
+        # Fixed backdrop: sampled pixels outside the recording must stay stable.
+        g = studio.geometry(studio.probe(still),studio.options(opts))
+        a,b = frame(output,0),frame(output,1.5)
+        edge = g["w"] * 3 * max(1,(g["y"]-g["bar"])//3)
+        self.assertLess(difference(a[:edge],b[:edge]),1)
+
+    def test_invalid_timed_zooms_are_rejected(self):
+        event = dict(start=.2,end=1.2,amount=1.5,x=.5,y=.5)
+        for events in ([event,event], [event | {"end":2}], [event | {"x":-1}],
+                       [event | {"start":float("nan")}], [event | {"amount":10}],
+                       [event | {"end":.3}], [{"start":0}]):
+            self.assertNotEqual(self.render(opts=dict(zooms=events),check=False).returncode,0)
+        self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(),self.digest)
+
+    def test_corners_are_antialiased_and_shadow_fades_inside_canvas(self):
+        opts = studio.options({})
+        geo = studio.geometry(dict(width=640,height=360),opts)
+        _,decor,mask = studio.assets(self.path,geo,opts)
+        alpha = self.ffmpeg("-i",str(decor),"-vf","alphaextract","-frames:v","1",
+                            "-pix_fmt","gray","-f","rawvideo","-").stdout
+        w,h = geo["w"],geo["h"]
+        self.assertLessEqual(max(alpha[:w]+alpha[-w:]+alpha[::w]+alpha[w-1::w]),1)
+        fade = [alpha[y*w+w//2] for y in range(geo["y"]+geo["vh"],h)]
+        self.assertGreater(len(set(fade)),5)
+        self.assertEqual(fade,sorted(fade,reverse=True))
+        pixels = self.ffmpeg("-i",str(mask),"-frames:v","1","-pix_fmt","gray","-f","rawvideo","-").stdout
+        self.assertTrue(any(0<p<255 for p in pixels),"Rounded edges need partial alpha coverage")
+
     def test_bad_image_options_or_source_never_replaces_original(self):
         bad=self.path/"not-an-image.png"
         bad.write_text('<svg><image href="http://127.0.0.1/private"/></svg>')

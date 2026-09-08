@@ -20,7 +20,7 @@ import zlib
 
 DEFAULTS = dict(preset="midnight", background="midnight", image="", color="#20242f",
                 padding="normal", frame="rounded", shadow=True, aspect="original",
-                fit="fit", zoom="1", focus="center")
+                fit="fit", zoom="1", focus="center", zooms=[], previewTime=0)
 PRESETS = {
     "midnight": dict(background="midnight", frame="rounded", shadow=True, padding="normal"),
     "paper": dict(background="paper", frame="application", shadow=True, padding="normal"),
@@ -46,7 +46,40 @@ def options(value):
         raise ValueError("Use a six-digit color such as #20242f")
     if not isinstance(result["image"], str):
         raise ValueError("Choose a local PNG, JPEG or WebP image")
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+    if not number(result["previewTime"]) or not 0 <= result["previewTime"] < 86400:
+        raise ValueError("Choose a preview time within the recording")
+    if not isinstance(result["zooms"], list) or len(result["zooms"]) > 8:
+        raise ValueError("Use up to eight manual zooms")
+    end = 0
+    for event in result["zooms"]:
+        if (not isinstance(event, dict) or set(event) != {"start", "end", "amount", "x", "y"}
+                or not all(number(v) for v in event.values())
+                or not end <= event["start"] < event["end"] < 86400
+                or event["end"] - event["start"] < .5
+                or not 1.1 <= event["amount"] <= 2
+                or not 0 <= event["x"] <= 1 or not 0 <= event["y"] <= 1):
+            raise ValueError("Zooms need non-overlapping time ranges of at least 0.5 seconds and a point inside the picture")
+        end = event["end"]
     return result
+
+
+def zoom_expressions(events):
+    """The same timestamp expressions drive preview and export."""
+    z, x, y = "1", "0.5", "0.5"
+    for event in events:
+        start, end = event["start"], event["end"]
+        ramp = min(.35, (end-start)/3)
+        phase = f"min(clip((in_time-{start})/{ramp},0,1),clip(({end}-in_time)/{ramp},0,1))"
+        eased = f"(({phase})*({phase})*(3-2*({phase})))"
+        condition = f"between(in_time,{start},{end})"
+        z = f"if({condition},1+{event['amount']-1}*{eased},{z})"
+        # This anchor stays at its relative screen position during the zoom,
+        # avoiding the initial sideways jump of a clamped centered crop.
+        x = f"if({condition},{event['x']},{x})"
+        y = f"if({condition},{event['y']},{y})"
+    return z, f"(iw-iw/zoom)*({x})", f"(ih-ih/zoom)*({y})"
 
 
 def local_file(value):
@@ -146,6 +179,21 @@ def inset(y, height, radius):
     return round(radius - math.sqrt(max(0, radius*radius - distance*distance)))
 
 
+def rounded_row(width, height, radius, y):
+    """Four vertical samples and horizontal pixel coverage for smooth corners."""
+    if not radius:
+        return b"\xff" * width
+    cuts = []
+    for sample in range(4):
+        py = y + (sample + .5) / 4
+        distance = max(radius - py, py - (height - radius), 0)
+        cuts.append(radius - math.sqrt(max(0, radius * radius - distance * distance)))
+    edge = min(width // 2, math.ceil(max(cuts)))
+    left = bytes(round(255 * sum(min(1, max(0, x + 1 - cut)) for cut in cuts) / 4)
+                 for x in range(edge))
+    return left + b"\xff" * (width - edge * 2) + left[::-1]
+
+
 def assets(directory, geo, opts):
     w, h, vw, vh = (geo[k] for k in ("w", "h", "vw", "vh"))
     bg, decor, mask = (directory / name for name in ("background.png", "decoration.png", "mask.png"))
@@ -170,39 +218,65 @@ def assets(directory, geo, opts):
 
     def rect(x, y, rw, rh, radius, rgba):
         for line in range(max(0,y), min(h,y+rh)):
-            cut = inset(line-y, rh, radius)
-            left, right = max(0,x+cut), min(w,x+rw-cut)
+            coverage = rounded_row(rw, rh, radius, line-y)
+            left, right = max(0,x), min(w,x+rw)
             if right > left:
-                rows[line][left*4:right*4] = bytes(rgba)*(right-left)
+                pixels = bytearray(bytes(rgba) * (right-left))
+                pixels[3::4] = bytes(round(a * rgba[3] / 255) for a in coverage[left-x:right-x])
+                rows[line][left*4:right*4] = pixels
 
     x, y, bar, radius = (geo[k] for k in ("x", "y", "bar", "radius"))
     if opts["shadow"]:
-        # A small stepped-alpha falloff is baked once, not recomputed per frame.
-        spread = max(2, min(w,h)//45)
-        for delta in range(spread, -1, -1):
-            rect(x-delta, y-bar-delta+spread//2, vw+delta*2, vh+bar+delta*2,
-                 radius+delta, (0,0,0,round(45*(1-delta/(spread+1)))))
+        # Blur one silhouette once. Leave room for its falloff inside the canvas.
+        margin = min(x, w-x-vw, y-bar, h-y-vh)
+        sigma = max(.5, min(min(w,h) * .012, margin / 4))
+        offset = max(1, round(sigma * .6))
+        rect(x, y-bar+offset, vw, vh+bar, radius, (0,0,0,65))
+        seed = directory / "shadow-seed.png"
+        shadow = directory / "shadow.png"
+        png(seed, w, h, rows, 6)
+        run(["ffmpeg", "-v", "error", "-nostdin", "-threads", "2", "-i", str(seed),
+             "-vf", f"format=gbrap,gblur=sigma={sigma:.4f}:steps=3,format=rgba",
+             "-frames:v", "1", "-threads", "2", str(shadow)], 30)
+        rows = [bytearray(w*4) for _ in range(h)]
     if bar:
         rect(x, y-bar, vw, vh+bar, radius, (34,37,45,255))
         for i, color in enumerate(((231,112,107,255),(232,193,102,255),(128,180,140,255))):
             size = max(2,bar//4)
             rect(x+bar//2+i*size*2, y-bar+(bar-size)//2, size, size, size//2, color)
     png(decor, w, h, rows, 6)
-    png(mask, vw, vh, (b"\0"*cut + b"\xff"*(vw-2*cut) + b"\0"*cut
-        for line in range(vh) for cut in [inset(line,vh,radius) if not bar or line>vh//2 else 0]), 0)
+    if opts["shadow"]:
+        combined = directory / "frame-shadow.png"
+        run(["ffmpeg", "-v", "error", "-nostdin", "-filter_complex_threads", "2",
+             "-i", str(shadow), "-i", str(decor), "-filter_complex", "overlay=format=auto",
+             "-frames:v", "1", "-threads", "2", str(combined)], 30)
+        decor = combined
+    png(mask, vw, vh, (rounded_row(vw, vh, radius if not bar or line>vh//2 else 0, line)
+                       for line in range(vh)), 0)
     return bg, decor, mask
 
 
 def render(source, opts, directory, preview=False):
     source = local_file(source)
     info = probe(source)
+    if any(e["end"] > info["duration"] + .001 for e in opts["zooms"]):
+        raise ValueError("A zoom ends after this recording. Adjust its time range.")
+    if preview and opts["previewTime"] >= info["duration"]:
+        raise ValueError("Choose a preview time before the end of the recording")
     geo = geometry(info, opts)
+    geo["duration"] = info["duration"]
     bg, decor, mask = assets(directory, geo, opts)
     w,h,vw,vh,x,y,cw,ch,cx,cy = (geo[k] for k in ("w","h","vw","vh","x","y","cw","ch","cx","cy"))
     sw, sh = info["width"], info["height"]
     # Background is looped at the source rate; screen EOF ends video output.
-    graph = (f"[0:v:0]scale={sw}:{sh},setsar=1,crop={cw}:{ch}:{cx}:{cy},"
-             f"scale={vw}:{vh}:flags=lanczos,format=rgb24[screen];"
+    screen = f"scale={vw}:{vh}:flags=lanczos"
+    if opts["zooms"]:
+        z, zx, zy = zoom_expressions(opts["zooms"])
+        start = opts["previewTime"] if preview else 0
+        screen = (f"setpts=PTS-STARTPTS+{start}/TB,fps={info['fps']},format=yuv444p,"
+                  f"zoompan=z='{z}':x='{zx}':y='{zy}':d=1:s={vw}x{vh}:fps={info['fps']},"
+                  "setpts=PTS-STARTPTS")
+    graph = (f"[0:v:0]scale={sw}:{sh},setsar=1,crop={cw}:{ch}:{cx}:{cy},{screen},format=rgb24[screen];"
              "[screen][3:v]alphamerge[rounded];"
              "[1:v][2:v]overlay=format=auto[backdrop];"
              f"[backdrop][rounded]overlay={x}:{y}:shortest=1:format=auto,format=yuv420p")
@@ -210,7 +284,10 @@ def render(source, opts, directory, preview=False):
         graph += ",scale=960:640:force_original_aspect_ratio=decrease"
     graph += "[out]"
     target = directory / ("preview.png" if preview else "render.mp4")
-    command = ["ffmpeg", "-v", "error", "-nostdin", "-filter_complex_threads", "2",
+    command = ["ffmpeg", "-v", "error", "-nostdin", "-filter_complex_threads", "2"]
+    if preview:
+        command += ["-ss", str(opts["previewTime"])]
+    command += [
                "-protocol_whitelist", "file,pipe", "-f", "mov", "-threads", "2", "-i", str(source),
                "-loop", "1", "-framerate", str(info["fps"]), "-i", str(bg), "-i", str(decor), "-i", str(mask),
                "-filter_complex", graph, "-map", "[out]"]
@@ -252,7 +329,8 @@ def main():
                                and not p.is_symlink()), key=lambda p: p.stat().st_mtime, reverse=True)
             for old in previews[8:]:
                 old.unlink(missing_ok=True)
-        print(json.dumps(dict(file=str(dest), original=str(source), width=geo["w"], height=geo["h"], options=opts)))
+        print(json.dumps(dict(file=str(dest), original=str(source), width=geo["w"], height=geo["h"],
+                             duration=geo["duration"], picture={k: geo[k] for k in ("x", "y", "vw", "vh")}, options=opts)))
 
 
 if __name__ == "__main__":

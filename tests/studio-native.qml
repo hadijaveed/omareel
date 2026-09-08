@@ -77,11 +77,25 @@ ShellRoot {
         button(editor,"Remember style").clicked()
         stage = 4
       } else if (stage === 4 && editor.feedback === "Style saved for your next Studio recording.") {
-        editor.exportCopy()
+        editor.seek(0.2)
+        editor.addZoom()
+        editor.editZoom(0,"end",1.2)
+        editor.beginPick(0)
         stage = 5
-      } else if (stage === 5 && completed) {
+      } else if (stage === 5 && !editor.waiting && editor.renderedRevision === editor.revision) {
+        if (!expect(!button(editor,"Export styled copy").enabled, "Choose focus before exporting")) return
+        editor.pickPoint(0.8,0.2)
+        stage = 6
+      } else if (stage === 6 && !editor.waiting && editor.renderedRevision === editor.revision) {
+        if (!expect(editor.pickingZoom === -1 && editor.style.zooms[0].x === 0.8
+                    && editor.style.zooms[0].y === 0.2 && Math.abs(editor.style.previewTime-0.7)<0.01,
+                    "Click focus and timed preview must be preserved")) return
+        if (!expect(!editor.saveZooms([editor.style.zooms[0],editor.style.zooms[0]]), "Reject overlapping zooms")) return
+        editor.exportCopy()
+        stage = 7
+      } else if (stage === 7 && completed) {
         expect(observedExport && !editor.exporting && editor.feedback === "", "Export completion")
-        console.log("STUDIO NATIVE PASS: preview, stale response, presets, failure, reset, save and export")
+        console.log("STUDIO NATIVE PASS: preview, stale response, presets, failure, reset, save, timed click zoom and export")
         Qt.quit()
       }
     }
