@@ -43,6 +43,8 @@ jobs:
         run: python3 tests/upload-regression.py
       - name: Test private runtime paths and atomic files
         run: python3 tests/runtime-security.py
+      - name: Test safe settings and Stop recovery
+        run: python3 tests/settings-security.py
       - name: Test recording workflow
         run: python3 tests/workflow-regression.py
       - name: Test untrusted text rendering and loopback request isolation

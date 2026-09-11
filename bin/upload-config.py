@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validated upload destinations. Never print or put credentials in argv."""
 import configparser
-import fcntl
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,11 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from urllib.parse import quote, urlsplit
+
+sys.dont_write_bytecode = True
+
+from settings import Settings
 
 
 MANAGED = {"s3", "r2", "b2", "s3compat"}
@@ -131,10 +135,10 @@ def save(upload, path):
         raise ValueError("Enter both access key and secret together, or leave both blank to keep them")
     if any(ord(c) < 32 for c in key + secret):
         raise ValueError("Credentials must not contain control characters")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(path) + ".omareel.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        cp = read_remotes(path)
+    with contextlib.closing(Settings(str(path), create=True)) as store, store.locked(path.name + ".omareel.lock"):
+        cp = configparser.RawConfigParser()
+        if store.inspect(path.name):
+            cp.read_string(store.read(path.name).decode())
         match = credentials_match(cp, expected)
         if not key and not match:
             raise ValueError("Enter both credentials for this provider/account/region; old credentials cannot be reused")
@@ -150,17 +154,10 @@ def save(upload, path):
         # Bucket policy controls visibility. B2 rejects canned private ACLs;
         # modern AWS buckets disable ACLs, and R2 does not implement them.
         cp.remove_option("omareel", "acl")
-        fd, tmp = tempfile.mkstemp(prefix=".omareel-", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w") as fh:
-                os.fchmod(fh.fileno(), 0o600)
-                cp.write(fh)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        contents = io.StringIO()
+        cp.write(contents)
+        store.write(path.name, contents.getvalue().encode())
+        os.fsync(store.fd)
     return f"Saved rclone remote 'omareel' ({expected['provider']})"
 
 

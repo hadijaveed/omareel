@@ -216,21 +216,36 @@ Panel {
     onFileChanged: stateFile.reload()
   }
 
-  FileView {
+  // Load settings through the same checked reader as the CLI. Watch only the
+  // directory for atomic replacements; never read a planted settings symlink.
+  Process {
     id: configFile
-    path: Quickshell.env("OMAREEL_CONFIG") || root.home + "/.config/omarchy/omareel.json"
+    property bool pending: false
+    function reload() {
+      if (running) pending = true
+      else running = true
+    }
+    command: [root.cli, "config", "get"]
+    stdout: StdioCollector { id: configOutput; waitForEnd: true }
+    stderr: StdioCollector { id: configError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.config = Omareel.parseJson(configOutput.text, {})
+        remoteRefresh.restart()
+      } else {
+        root.message = String(configError.text || "Cannot read settings.").trim()
+      }
+      if (pending) { pending = false; reload() }
+    }
+  }
+  FileView {
+    path: (Quickshell.env("OMAREEL_CONFIG") || root.home + "/.config/omarchy/omareel.json").replace(/\/[^/]+$/, "")
     watchChanges: true
     printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      root.config = Omareel.parseJson(text(), {})
-      remoteRefresh.restart()
-    }
-    onLoadFailed: root.config = {}
+    onFileChanged: configFile.reload()
   }
 
-  // `omareel status` creates the runtime dir, the default config and an idle
-  // state file, so the watchers above have something to attach to.
+  // Recorder status must stay available even when settings need repair.
   Process {
     id: runtimeProc
     command: [root.cli, "status"]

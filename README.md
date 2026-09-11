@@ -354,8 +354,17 @@ processing, and sharing commands are serialized; a duplicate click cannot
 start a second picker or finalize the same file twice. Settings writes are
 also serialized so rapidly changing multiple options preserves each change.
 
+Settings updates use owner-checked paths and atomic replacement. Symlinked,
+shared-writable or hard-linked settings and lock files are rejected. Use a regular
+file at `OMAREEL_CONFIG` if you keep settings outside the default directory.
+If settings become missing or invalid during a recording, Stop still saves locally
+without voice cleanup, retains the raw take and shows a warning. It leaves the
+settings untouched so you can restore them before recording again.
+
 ### Regression checks
 
+Run `python3 tests/settings-security.py` for settings path attacks, atomic-write
+failures and Stop recovery with unusable settings.
 Run `python3 tests/audio-regression.py` for local DSP tests (FFmpeg and the
 RNNoise LADSPA plugin required), `python3 tests/workflow-regression.py` for
 isolated workflow tests, and `node tests/helpers.js` for card placement and

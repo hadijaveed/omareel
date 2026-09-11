@@ -95,55 +95,34 @@ default_config() {
 JSON
 }
 
-ensure_config() (
-  mkdir -p "$(dirname "$CONFIG_FILE")"
-  exec {config_lock}>"$CONFIG_FILE.lock"
-  flock "$config_lock" || return 1
-  if [[ ! -f $CONFIG_FILE ]]; then
-    mkdir -p "$(dirname "$CONFIG_FILE")"
-    default_config >"$CONFIG_FILE"
-  fi
+# Settings share the checked-descriptor file operations used by runtime storage.
+# Cache one validated snapshot per CLI invocation; merges always reread under lock.
+unset CONFIG_JSON
+SETTINGS_RECOVERY=false
+settings() { python3 "$PLUGIN_DIR/bin/settings.py" "$CONFIG_FILE" "$@"; }
+ensure_config() { CONFIG_JSON=$(default_config | settings ensure); }
+config_read() {
+  if [[ ${CONFIG_JSON+x} ]]; then printf '%s\n' "$CONFIG_JSON"; else settings read; fi
+}
 
-  # <= 0.7.7 called the camera placement key webcamCorner. During a hot
-  # plugin reload the old launcher can briefly keep running and write that
-  # key even after the recorder has learned webcamPosition. Canonicalise it
-  # on every invocation so two conflicting placement values can never exist.
-  if jq -e 'has("webcamCorner")' "$CONFIG_FILE" >/dev/null 2>&1; then
-    local tmp="$CONFIG_FILE.tmp"
-    jq --indent 2 '.webcamPosition = .webcamCorner | del(.webcamCorner)' \
-      "$CONFIG_FILE" >"$tmp" && mv "$tmp" "$CONFIG_FILE"
-  fi
-)
-
-# cfg <jq-path> <default>
-# cfg <jq-path> <default>. Not `//`: jq's alternative operator treats false
-# like null, which made every toggle switched off read as its default.
+# jq's // treats false as missing, so preserve explicit disabled toggles.
 cfg() {
   local value
-  value=$(jq -r "$1" "$CONFIG_FILE" 2>/dev/null)
+  value=$(config_read | jq -r "$1" 2>/dev/null)
   [[ -n $value && $value != "null" ]] && printf '%s' "$value" || printf '%s' "$2"
 }
 
-# config_merge '<json>' — deep-merge a patch into the config file.
-config_merge() (
-  exec {config_lock}>"$CONFIG_FILE.lock"
-  flock "$config_lock" || return 1
-  local patch="$1" tmp
-  jq -e . <<<"$patch" >/dev/null 2>&1 || {
-    echo "config merge: invalid JSON" >&2
-    return 2
-  }
-  tmp="$CONFIG_FILE.tmp"
-  # Accept placement writes from both the current launcher and an old QML
-  # instance that is still alive while Omarchy reloads the plugin. Always
-  # persist only webcamPosition so the backend and UI cannot disagree.
-  jq --indent 2 --argjson p "$patch" '
-    ($p | if has("webcamCorner")
-          then .webcamPosition = .webcamCorner | del(.webcamCorner)
-          else . end) as $normalized
-    | (. * $normalized) | del(.webcamCorner)
-  ' "$CONFIG_FILE" >"$tmp" && mv "$tmp" "$CONFIG_FILE"
-)
+config_merge() { CONFIG_JSON=$(printf '%s' "$1" | settings merge); }
+
+# Stop must remain available if settings are deleted, malformed or unsafe.
+# Never repair/replace those settings as a side effect of saving a take.
+load_stop_settings() {
+  if ! CONFIG_JSON=$(settings read); then
+    CONFIG_JSON=$(default_config)
+    SETTINGS_RECOVERY=true
+    echo "Settings unavailable; saving locally without voice cleanup and retaining the raw take." >&2
+  fi
+}
 
 expand_home() { printf '%s' "${1/#\~/$HOME}"; }
 
@@ -833,7 +812,7 @@ cmd_start() {
     webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom"
 }
 
-compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check "$CONFIG_FILE" "$@"; }
+compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check <(config_read) "$@"; }
 
 start_error() {
   local message="${1:-Recording could not start. Open Settings → Setup.}"
@@ -857,6 +836,7 @@ cmd_stop() {
   raw=$(state_get file)
   denoise=$(state_get denoise)
   upload=$(state_get upload)
+  if [[ $SETTINGS_RECOVERY == true ]]; then denoise=false; upload=none; fi
   mic=$(state_get mic)
   desktop=$(state_get desktop)
   [[ -n $mic ]] || mic=$(cfg .mic true)
@@ -899,6 +879,9 @@ cmd_stop() {
 
   set_state processing progress=0 stoppedAt="$(date +%s)"
   local final="${raw%.raw.mp4}.mp4" processing_warning=""
+  if [[ $SETTINGS_RECOVERY == true ]]; then
+    processing_warning="Settings unavailable; saved locally without voice cleanup. Raw take retained. Restore your settings before recording again."
+  fi
   local composite=false
   [[ $(state_get targetKind) == window ]] && composite=true
   if ! finalize_video "$raw" "$final" "$denoise" "$composite" "$mic" "$desktop" \
@@ -910,7 +893,7 @@ cmd_stop() {
       return 1
     }
     processing_warning="Cleanup failed; saved the unprocessed recording. The raw take is retained."
-  elif [[ $(cfg .keepRaw true) != true ]]; then
+  elif [[ $SETTINGS_RECOVERY != true && $(cfg .keepRaw true) != true ]]; then
     rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
   fi
   rm -f "${raw%.raw.mp4}.cam.start"
@@ -929,7 +912,7 @@ cmd_stop() {
   append_index "$final" "$url"
 
   local can_upload=false
-  [[ -z $url ]] && upload_ready && can_upload=true
+  [[ $SETTINGS_RECOVERY != true && -z $url ]] && upload_ready && can_upload=true
   set_state done file="$final" url="$url" progress=100 canUpload="$can_upload" warning="$processing_warning"
   if [[ -n $url ]]; then
     notify -u normal -t 10000 --image "$thumb" "Omareel link copied" "$url" --exec xdg-open "$url"
@@ -1576,7 +1559,7 @@ HTML
 }
 
 # All provider validation and URL construction use the same implementation.
-upload_config() { python3 "$PLUGIN_DIR/bin/upload-config.py" "$1" "$CONFIG_FILE" "$RCLONE_CONF" "${@:2}"; }
+upload_config() { python3 "$PLUGIN_DIR/bin/upload-config.py" "$1" <(config_read) "$RCLONE_CONF" "${@:2}"; }
 upload_ready() { upload_config validate >/dev/null 2>&1; }
 remote_path() { upload_config path 2>/dev/null; }
 public_base() { upload_config base; }
@@ -1608,7 +1591,7 @@ upload_video() (
   local video="$1" thumb="${2:-}" title="${3:-}" id="${4:-}"
   local remote base snapshot page=""
   snapshot=$(mktemp "$RUNTIME_DIR/upload-config.XXXXXX") || return 1
-  cp "$CONFIG_FILE" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  config_read >"$snapshot" || { rm -f "$snapshot"; return 1; }
   CONFIG_FILE="$snapshot"
   trap 'rm -f "$snapshot"; [[ -z $page ]] || rm -f "$page"' EXIT
   upload_config validate || return 1
@@ -1809,7 +1792,7 @@ cmd_remote_status() { upload_config status; }
 cmd_remote_test() (
   local work remote base name link out attempted=false
   work=$(mktemp -d "$RUNTIME_DIR/upload-test.XXXXXX") || return 1
-  cp "$CONFIG_FILE" "$work/config.json" || { rmdir "$work"; return 1; }
+  config_read >"$work/config.json" || { rmdir "$work"; return 1; }
   CONFIG_FILE="$work/config.json"
   trap 'rm -f "$work/config.json"; rmdir "$work" 2>/dev/null || true' EXIT
   upload_config validate || return 1
@@ -1984,11 +1967,16 @@ start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | s
   ;;
 esac
 
-ensure_config || exit 1
-jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 || {
-  echo "Invalid settings JSON: $CONFIG_FILE. Restore a valid configuration; the file was not replaced." >&2
-  exit 1
-}
+# Read-only recorder status and emergency controls never depend on settings.
+case "${1:-}" in
+status | active | cancel | dismiss) ;;
+stop) load_stop_settings ;;
+toggle)
+  if gsr_running || [[ $(current_phase) == recording ]]; then load_stop_settings
+  else ensure_config || exit 1; fi
+  ;;
+*) ensure_config || exit 1 ;;
+esac
 
 case "${1:-}" in
 upload | rename | page | finalize | setup | link)
@@ -2017,7 +2005,7 @@ setup) shift; cmd_setup "$@" ;;
 link) cmd_link ;;
 config)
   case "${2:-get}" in
-  get) cat "$CONFIG_FILE" ;;
+  get) config_read ;;
   merge) config_merge "${3:-}" ;;
   path) echo "$CONFIG_FILE" ;;
   *) usage; exit 2 ;;
