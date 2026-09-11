@@ -25,6 +25,8 @@ def main():
             for unsafe in (False, True):
                 work = Path(directory) / (filename + ("-unsafe" if unsafe else "-normal"))
                 work.mkdir(mode=0o700)
+                # Broken settings must not hide Stop/state on shell startup.
+                (work / "config.json").write_text("broken JSON")
                 runtime = work / "omareel"
                 victim = work / "victim.json"
                 victim.write_text('{"phase":"done","id":"planted"}')

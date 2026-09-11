@@ -26,7 +26,7 @@ def check_owner(info, directory=False):
         raise ValueError("runtime entries must not be writable by others or hard-linked")
 
 
-def open_base(path):
+def open_base(path, create=False):
     if not path or not os.path.isabs(path):
         raise ValueError("XDG_RUNTIME_DIR must name an absolute, user-owned session directory; no /tmp fallback")
     fd = os.open("/", DIRECTORY_FLAGS)
@@ -42,6 +42,11 @@ def open_base(path):
                 info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)
             ):
                 raise ValueError("unsafe ancestor of XDG_RUNTIME_DIR")
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
             child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
