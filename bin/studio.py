@@ -455,7 +455,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
     try:
         main()
-    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print("Studio: " + str(error), file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

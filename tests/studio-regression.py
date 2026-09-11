@@ -239,6 +239,7 @@ class StudioRegression(unittest.TestCase):
         (self.path/"omareel").symlink_to(outside,target_is_directory=True)
         result=self.render(action="preview",check=False)
         self.assertNotEqual(result.returncode,0)
+        self.assertNotIn("Traceback",result.stderr)
         self.assertEqual(list(outside.iterdir()),[])
         self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(),self.digest)
 
