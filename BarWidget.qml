@@ -23,8 +23,9 @@ Panel {
 
   readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, ""))
   readonly property string home: Quickshell.env("HOME")
-  readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omareel"
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") + "/omareel" : ""
 
+  property bool runtimeReady: false
   property var state: ({ phase: "idle" })
   property var config: ({})
   property var devices: ({ mics: [], outputs: [], cameras: [] })
@@ -119,6 +120,7 @@ Panel {
   }
 
   function refreshAll() {
+    if (!root.runtimeReady) runtimeProc.running = true
     stateFile.reload()
     configFile.reload()
     devicesProc.running = true
@@ -197,18 +199,18 @@ Panel {
 
   FileView {
     id: stateFile
-    path: root.runtimeDir + "/state.json"
+    path: root.runtimeReady ? root.runtimeDir + "/state.json" : ""
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
     onLoaded: root.state = Omareel.parseJson(text(), { phase: "idle" })
-    onLoadFailed: root.state = { phase: "idle" }
+    onLoadFailed: { if (root.runtimeReady) root.state = { phase: "idle" } }
   }
 
   // state.json is replaced atomically (write tmp + mv), which some watchers
   // report on the directory rather than the file. Watch both.
   FileView {
-    path: root.runtimeDir
+    path: root.runtimeReady ? root.runtimeDir : ""
     watchChanges: true
     printErrors: false
     onFileChanged: stateFile.reload()
@@ -230,11 +232,19 @@ Panel {
   // `omareel status` creates the runtime dir, the default config and an idle
   // state file, so the watchers above have something to attach to.
   Process {
+    id: runtimeProc
     command: [root.cli, "status"]
     running: true
-    onExited: function() {
-      stateFile.reload()
-      configFile.reload()
+    stderr: StdioCollector { id: runtimeError; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.runtimeReady = exitCode === 0
+      if (root.runtimeReady) {
+        stateFile.reload()
+        configFile.reload()
+      } else {
+        root.message = String(runtimeError.text || "Cannot open private recording state.").trim()
+        root.state = { phase: "error", error: root.message }
+      }
     }
   }
 

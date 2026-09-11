@@ -32,7 +32,11 @@ set -uo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 PLUGIN_DIR="$(dirname "$(dirname "$SELF")")"
 CONFIG_FILE="${OMAREEL_CONFIG:-$HOME/.config/omarchy/omareel.json}"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omareel"
+# Refuse unsafe session paths before config, state, logs or locks are touched.
+# This also applies when tests/source callers load the helper functions.
+runtime() { python3 "$PLUGIN_DIR/bin/runtime.py" "$@"; }
+RUNTIME_DIR=$(runtime init) || { return 1 2>/dev/null || exit 1; }
+umask 077
 STATE_FILE="$RUNTIME_DIR/state.json"
 LOG_FILE="$RUNTIME_DIR/omareel.log"
 PID_FILE="$RUNTIME_DIR/gsr.pid"
@@ -42,8 +46,6 @@ RCLONE_CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
 RCLONE_REMOTE="omareel"
 INDEX_FILE_NAME="index.jsonl"
 LADSPA_RNNOISE=/usr/lib/ladspa/librnnoise_ladspa.so
-
-mkdir -p "$RUNTIME_DIR"
 
 # ---------------------------------------------------------------- config ---
 
@@ -165,32 +167,32 @@ set_state() {
     filter+=" + {$key: \$$key}"
   done
   local previous='{}'
-  [[ -f $STATE_FILE ]] && previous=$(cat "$STATE_FILE")
+  [[ -f $STATE_FILE ]] && previous=$(runtime read state.json) || return 1
   # Carry the recording identity across phases so the UI can keep showing the
   # target/timer while processing and the URL when done.
   jq -n "${args[@]}" --argjson prev "$previous" \
     '($prev | {id, target, targetKind, region, file, startedAt, stoppedAt, url, title,
       webcamSize, webcamShape, webcamPosition, webcamZoom}) + '"$filter" \
-    >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+    | runtime write state.json || return 1
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
 
 # state_get <key>: empty when unset (jq's // would also swallow a false).
-state_get() { jq -r "if .$1 == null then empty else .$1 end" "$STATE_FILE" 2>/dev/null; }
+state_get() { runtime read state.json | jq -r "if .$1 == null then empty else .$1 end"; }
 current_phase() { [[ -f $STATE_FILE ]] && state_get phase || echo idle; }
 
 reset_state() {
-  jq -n '{phase: "idle", updatedAt: (now | floor)}' >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+  jq -n '{phase: "idle", updatedAt: (now | floor)}' | runtime write state.json || return 1
   rm -f "$PID_FILE"
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
 
 notify() { omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true; }
-log() { echo "$(date '+%F %T') $*" >>"$LOG_FILE"; }
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" | runtime append omareel.log; }
 
 gsr_running() {
   local pid
-  pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  pid=$(runtime read gsr.pid 2>/dev/null) || return 1
   [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
   [[ $(readlink "/proc/$pid/exe" 2>/dev/null) == */gpu-screen-recorder ]] || return 1
   kill -0 "$pid" 2>/dev/null
@@ -307,7 +309,7 @@ camera_holder() {
 kill_tracked() {
   local pidfile="$1" program="$2" pid
   [[ -f $pidfile ]] || return 0
-  pid=$(cat "$pidfile")
+  pid=$(runtime read "${pidfile##*/}")
   if [[ -n $pid ]] && [[ $(ps -o comm= -p "$pid" 2>/dev/null) == "$program" ]]; then
     kill -INT "$pid" 2>/dev/null || true
     local count=0
@@ -381,11 +383,11 @@ start_webcam() {
     -use_wallclock_as_timestamps 1 -i "$device" \
     -map 0:v -c:v libx264 -preset ultrafast -tune zerolatency -crf 20 -pix_fmt yuv420p -g 30 -copyts \
     -f tee "[f=mp4:onfail=ignore]$out|[f=nut:onfail=ignore]pipe:1" \
-    2>>"$LOG_FILE" > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
+    2> >(runtime append omareel.log >/dev/null 2>&1) > >(mpv - --profile=low-latency --untimed --no-cache --demuxer-lavf-format=nut --background=none \
       "--vf=lavfi=[$(bubble_crop "$shape" "$zoom")scale=$crop_w:$crop_h,format=rgba[a];movie=$mask,format=gray[m];[a][m]alphamerge]" \
       --title="WebcamOverlay" --wayland-app-id="$(overlay_class "$bubble_size")" \
-      --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn >>"$LOG_FILE" 2>&1) &
-  echo $! >"$CAM_PID_FILE" # right away: nothing backgrounded later may replace it
+      --no-border --no-audio --no-osc --osd-level=0 --msg-level=all=warn > >(runtime append omareel.log >/dev/null 2>&1) 2>&1) &
+  printf '%s\n' "$!" | runtime write cam.pid # right away: nothing backgrounded later may replace it
 
   ( # put the self-view in its corner once the window exists; say so if it never does
     local n placed=false
@@ -426,7 +428,7 @@ stop_webcam_capture() { kill_tracked "$CAM_PID_FILE" ffmpeg; }
 
 webcam_capture_alive() {
   local pid
-  pid=$(cat "$CAM_PID_FILE" 2>/dev/null) || return 1
+  pid=$(runtime read cam.pid 2>/dev/null) || return 1
   [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
 }
 
@@ -613,8 +615,7 @@ rename_recording() {
   fi
   index_patch "$file" '.file = $new | .title = $title' --arg new "$new" --arg title "$title"
   if [[ -f $STATE_FILE && $(state_get file) == "$file" ]]; then
-    jq --arg f "$new" --arg t "$title" '.file = $f | .title = $t' "$STATE_FILE" >"$STATE_FILE.tmp" &&
-      mv "$STATE_FILE.tmp" "$STATE_FILE"
+    runtime read state.json | jq --arg f "$new" --arg t "$title" '.file = $f | .title = $t' | runtime write state.json || return 1
     omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
   fi
   echo "$new"
@@ -785,9 +786,9 @@ cmd_start() {
   log "start kind=$kind target=$target audio=${audio_desc:-none} webcam=$webcam"
   gpu-screen-recorder "${capture_args[@]}" \
     -k "$codec" -q "$quality" -f "$fps" -fm cfr -cursor yes \
-    -fallback-cpu-encoding yes "${audio_args[@]}" -o "$raw" >>"$LOG_FILE" 2>&1 &
+    -fallback-cpu-encoding yes "${audio_args[@]}" -o "$raw" > >(runtime append omareel.log >/dev/null 2>&1) 2>&1 &
   local pid=$!
-  echo "$pid" >"$PID_FILE"
+  printf '%s\n' "$pid" | runtime write gsr.pid
 
   # The portal picker can take a while; wait until gsr starts writing.
   local waited=0
@@ -806,7 +807,7 @@ cmd_start() {
     cleanup_webcam
     rm -f "$PID_FILE"
     # Keep partial media for diagnosis/recovery, even on a failed start.
-    if [[ $target == portal ]] && tail -20 "$LOG_FILE" | grep -qi -E 'cancel|denied'; then
+    if [[ $target == portal ]] && runtime read omareel.log | tail -20 | grep -qi -E 'cancel|denied'; then
       reset_state
       return 1 # picker cancelled
     fi
@@ -852,7 +853,7 @@ cmd_stop() {
   fi
 
   local pid raw denoise upload mic desktop webcam_size webcam_shape webcam_position_value webcam_zoom
-  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  pid=$(runtime read gsr.pid 2>/dev/null || true)
   raw=$(state_get file)
   denoise=$(state_get denoise)
   upload=$(state_get upload)
@@ -953,7 +954,7 @@ cmd_dismiss() {
 cmd_cancel() {
   if gsr_running; then
     local pid raw
-    pid=$(cat "$PID_FILE")
+    pid=$(runtime read gsr.pid)
     raw=$(state_get file)
     kill -INT "$pid" 2>/dev/null
     sleep 0.5
@@ -1321,7 +1322,7 @@ bubble_filter() {
 bubble_mask_png() {
   local w="$1" h="$2" shape="$3" out="$4"
   ffmpeg -y -v error -f lavfi -i "color=white:size=${w}x${h}" \
-    -vf "format=gray,geq=lum='$(bubble_mask_expr "$(bubble_radius "$h" "$shape")")'" -frames:v 1 "$out"
+    -vf "format=gray,geq=lum='$(bubble_mask_expr "$(bubble_radius "$h" "$shape")")'" -frames:v 1 -c:v png -f image2pipe - | runtime write "${out##*/}"
 }
 
 # Place the on-screen camera window (mpv, found by class) in the chosen corner
@@ -1460,7 +1461,7 @@ finalize_video() {
     # faststart puts the index at the front so browsers stream instantly.
     args+=(-movflags +faststart)
 
-    if ffmpeg "${args[@]}" "$tmp" -loglevel error 2>>"$LOG_FILE"; then
+    if ffmpeg "${args[@]}" "$tmp" -loglevel error 2> >(runtime append omareel.log >/dev/null 2>&1); then
       log "finalize $(basename "$out") denoise=$engine"
       mv "$tmp" "$out"
       rm -f "$RUNTIME_DIR/mask-$$.png"
@@ -1590,7 +1591,7 @@ share_link() {
   if upload_config status | jq -e '.backend == "s3"' >/dev/null; then
     expiry=(--expire 168h)
   fi
-  link=$(rclone_run link "$1" "${expiry[@]}" 2>>"$LOG_FILE") || {
+  link=$(rclone_run link "$1" "${expiry[@]}" 2> >(runtime append omareel.log >/dev/null 2>&1)) || {
     echo "Upload succeeded, but this remote could not create a share link. Set a public URL or use a link-capable remote." >&2
     return 1
   }
@@ -1627,23 +1628,28 @@ upload_video() (
   local remote_video="$remote/$id.mp4"
 
   # Stream progress into the state file so the UI can show a percentage.
-  local progress_log="$RUNTIME_DIR/rclone.log"
-  : >"$progress_log"
+  local progress_fd progress_pid rstatus
+  runtime write rclone.log </dev/null || return 1
+  exec {progress_fd}> >(runtime append rclone.log >/dev/null 2>&1)
+  progress_pid=$!
   rclone_run copyto "$video" "$remote_video" --stats 1s --stats-one-line --stats-log-level NOTICE \
     --header-upload "Content-Type: video/mp4" --header-upload "Content-Disposition: inline" \
     --header-upload "Cache-Control: public, max-age=31536000" \
-    --s3-no-check-bucket --ignore-times >"$progress_log" 2>&1 &
+    --s3-no-check-bucket --ignore-times >&"$progress_fd" 2>&1 &
   local rpid=$!
+  exec {progress_fd}>&-
   while kill -0 "$rpid" 2>/dev/null; do
     local pct
-    pct=$(grep -oE '[0-9]+%' "$progress_log" | tail -1 | tr -d %)
+    pct=$(runtime read rclone.log | grep -oE '[0-9]+%' | tail -1 | tr -d %)
     [[ -n $pct ]] && set_state uploading progress="$pct"
     sleep 1
   done
-  wait "$rpid" || {
+  wait "$rpid"; rstatus=$?
+  wait "$progress_pid" || return 1
+  ((rstatus == 0)) || {
     echo "upload failed:" >&2
-    tail -5 "$progress_log" >&2
-    log "upload failed: $(tail -1 "$progress_log")"
+    runtime read rclone.log | tail -5 >&2
+    log "upload failed: $(runtime read rclone.log | tail -1)"
     return 1
   }
 
@@ -1658,7 +1664,7 @@ upload_video() (
   local poster_url=""
   if [[ -n $thumb && -f $thumb ]]; then
     if rclone_run copyto "$thumb" "$remote/$id.jpg" -q --s3-no-check-bucket \
-        --header-upload "Content-Type: image/jpeg" --header-upload "Content-Disposition: inline" 2>>"$LOG_FILE"; then
+        --header-upload "Content-Type: image/jpeg" --header-upload "Content-Disposition: inline" 2> >(runtime append omareel.log >/dev/null 2>&1); then
       [[ -z $base ]] || poster_url=$(public_object_url "$id.jpg")
     else
       log "thumbnail upload failed for $id; sharing video without a poster"
@@ -1669,7 +1675,7 @@ upload_video() (
     page=$(mktemp "$RUNTIME_DIR/player.XXXXXX.html") || return 1
     [[ -n $title ]] || title="Recording $(date -r "$video" '+%Y-%m-%d %H:%M')"
     player_page "$video_url" "$poster_url" "$title" "$video" "$(public_object_url "$id.html")" >"$page"
-    if rclone_run copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2>>"$LOG_FILE"; then
+    if rclone_run copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2> >(runtime append omareel.log >/dev/null 2>&1); then
       page_url=$(public_object_url "$id.html")
     fi
     rm -f "$page"
@@ -1708,7 +1714,7 @@ cmd_page() {
   local page
   page=$(mktemp "$RUNTIME_DIR/player.XXXXXX.html") || return 1
   player_page "$(public_object_url "$id.mp4")" "$(public_object_url "$id.jpg")" "$title" "$file" "$(public_object_url "$id.html")" >"$page"
-  rclone_run copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2>>"$LOG_FILE" || {
+  rclone_run copyto "$page" "$remote/$id.html" -q "${PAGE_HEADERS[@]}" 2> >(runtime append omareel.log >/dev/null 2>&1) || {
     rm -f "$page"
     echo "page: upload failed (see $LOG_FILE)" >&2
     return 1
@@ -1775,7 +1781,7 @@ cmd_rename() {
   local url
   url=$(jq -r '.url // empty' <<<"$entry")
   if [[ -n $url && $(cfg '.upload.playerPage' true) == true && -n $(cfg '.upload.publicBase' "") ]]; then
-    cmd_page "$new" >/dev/null 2>>"$LOG_FILE" || log "player page not refreshed; original share link preserved"
+    cmd_page "$new" >/dev/null 2> >(runtime append omareel.log >/dev/null 2>&1) || log "player page not refreshed; original share link preserved"
   fi
   echo "$new"
 }
@@ -1813,7 +1819,7 @@ cmd_remote_test() (
   probe_cleanup() {
     local result=$?
     trap - EXIT
-    if [[ $attempted == true ]] && ! rclone_run deletefile "$remote/$name" -q --retries 1 --low-level-retries 1 --contimeout 10s --timeout 20s 2>>"$LOG_FILE"; then
+    if [[ $attempted == true ]] && ! rclone_run deletefile "$remote/$name" -q --retries 1 --low-level-retries 1 --contimeout 10s --timeout 20s 2> >(runtime append omareel.log >/dev/null 2>&1); then
       echo "Probe cleanup failed: remove only $remote/$name (check delete permission)." >&2
       result=1
     fi
@@ -1833,7 +1839,7 @@ cmd_remote_test() (
     return 1
   fi
   if ! rclone_run cat "$remote/$name" --retries 1 --low-level-retries 1 \
-      --contimeout 10s --timeout 20s >"$work/readback.txt" 2>>"$LOG_FILE" \
+      --contimeout 10s --timeout 20s >"$work/readback.txt" 2> >(runtime append omareel.log >/dev/null 2>&1) \
       || ! cmp -s "$work/probe.txt" "$work/readback.txt"; then
     echo "Uploaded object could not be read back correctly (check read permission)." >&2
     return 1
@@ -1864,8 +1870,7 @@ cmd_remote_test() (
 # ----------------------------------------------------------------- misc ---
 
 cmd_status() {
-  [[ -f $STATE_FILE ]] || jq -n '{phase: "idle", updatedAt: (now | floor)}' >"$STATE_FILE"
-  cat "$STATE_FILE"
+  runtime read state.json
 }
 
 cmd_doctor() {
@@ -1962,21 +1967,19 @@ for bootstrap_dep in jq flock; do
   command -v "$bootstrap_dep" >/dev/null || { echo "Missing $bootstrap_dep. Install the requirements listed in README before starting Omareel." >&2; exit 1; }
 done
 
-# Serialize commands that mutate the recording or its saved result. --close
-# ensures camera/recorder children do not inherit the lock after Start exits.
+# Serialize commands that mutate the recording or its saved result. The runtime
+# helper opens the lock without following links and keeps it out of children.
 # This prevents a double Stop, upload during finalize, or two simultaneous
 # pickers from overwriting shared state or processing the same file twice.
 case "${1:-}" in
 remote)
   if [[ ${2:-status} == save || ${2:-status} == test ]] && [[ ${OMAREEL_OPERATION_LOCKED:-0} != 1 ]]; then
-    exec flock --nonblock --conflict-exit-code 75 --close "$RUNTIME_DIR/operation.lock" \
-      env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
+    exec python3 "$PLUGIN_DIR/bin/runtime.py" locked "$SELF" "$@"
   fi
   ;;
 start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link)
   if [[ ${OMAREEL_OPERATION_LOCKED:-0} != 1 ]]; then
-    exec flock --nonblock --conflict-exit-code 75 --close "$RUNTIME_DIR/operation.lock" \
-      env OMAREEL_OPERATION_LOCKED=1 "$SELF" "$@"
+    exec python3 "$PLUGIN_DIR/bin/runtime.py" locked "$SELF" "$@"
   fi
   ;;
 esac
