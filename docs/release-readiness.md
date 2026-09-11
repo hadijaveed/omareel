@@ -26,6 +26,15 @@ on each supported hardware family before broad certification.
   activation command, repeated explicit installation, conflicts and unsafe paths.
   This correction does not include Studio or change the existing release tag.
 
+- Runtime review correction (0.9.2): require a checked session directory; remove
+  the shared `/tmp` fallback. Runtime directory traversal uses `O_NOFOLLOW` and
+  verifies ownership and write permissions. Owned legacy 0755 runtime directories
+  are tightened to 0700. State/PID/mask updates use exclusive 0600 temporary files
+  and atomic replacement; log and lock access uses checked no-follow descriptors.
+  Startup and the UI reject unsafe entries before reading state. The recording
+  lock is closed in child processes so a background recorder cannot block Stop.
+  No conflicting entries are deleted or taken over automatically.
+
 - Marketplace security follow-up (0.9.1): all owned QML text sinks explicitly use PlainText. Shared Hint covers process output and endpoint errors. Local native-style dropdown/toggle variants protect device/config labels, and the upload tooltip no longer interpolates a destination through an upstream AutoText sink. Qt regression verifies literal error rendering, zero protected-sink loopback image requests, and a working vulnerable positive control.
 
 - Startup timeout now fails with a persistent error instead of claiming to record an absent file. Partial media is retained for recovery.
@@ -39,10 +48,14 @@ on each supported hardware family before broad certification.
 ## Automated release checks
 
 Run shell syntax, `node tests/helpers.js`, and all four Python regression
-suites: setup, workflow, audio, upload. Upload integration uses a local HTTPS
+suites: setup, workflow, audio, upload, runtime-security, and text-security. Upload integration uses a local HTTPS
 S3-compatible fixture, never a customer's account. QML parser and Omarchy
 manifest validation complement these tests but do not prove live UI behavior.
 The CI audio dependency is built from pinned upstream RNNoise v1.21.
+
+Run `python3 tests/runtime-native.py` on a native Quickshell installation to
+check the actual bar/panel startup processes and atomic state watchers, including
+rejection of a planted state symlink.
 
 Before releasing an action change, also run `python3 tests/shell-actions-native.py`
 on each supported Quickshell version. This exercises the production Stop button
@@ -56,6 +69,15 @@ also passed setup and Stop/recovery checks. A real GPU capture stopped through
 the production QML handler saved a moving, playable MP4 on the 4.0.1 machine.
 The 4.0.0 test session had only a virtual FALLBACK output, so a new GPU capture
 could not be tested there; its existing 94.45-second stranded take was recovered.
+
+The runtime correction passed 21 dedicated runtime regressions (including camera
+mask encoding) and the existing 73 Python regressions. Native Quickshell checks
+covered normal startup, atomic state updates, rejected state symlinks, and both
+Stop handlers on Omarchy 4.0.1. An isolated real GPU capture of a moving test
+window started in under one second and stopped through the production bar handler,
+saving a playable 2.6-second MP4 with distinct moving frames. Camera and microphone
+were off for that hardware smoke test; their physical-device matrix is still
+separate from the synthetic camera/audio coverage.
 
 ## Independent UX assessment
 

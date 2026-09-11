@@ -79,6 +79,14 @@ names alone. It checks the desktop connection, FFmpeg filters/encoders, recorder
 options, GPU info, output storage, and the enabled inputs. A successful probe
 does **not** replace a short real recording on a new laptop.
 
+Runtime files stay in the desktop session's `$XDG_RUNTIME_DIR/omareel`, with
+private directory permissions (0700) and new files limited to your user (0600).
+Omareel checks ownership and refuses symlinks, hard-linked files, and paths that
+other users can write to. State and PID updates use exclusive temporary files
+and atomic replacement. There is no shared `/tmp/omareel` fallback: run the CLI
+from your Omarchy desktop session. An unsafe-path error leaves the conflicting
+entry untouched; inspect the reported path rather than running with `sudo`.
+
 ### First recording
 
 ```bash

@@ -25,8 +25,9 @@ Item {
   property string omarchyPath: ""
 
   readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omareel")).replace(/^file:\/\//, ""))
-  readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omareel"
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") + "/omareel" : ""
 
+  property bool runtimeReady: false
   property var state: ({ phase: "idle" })
   property int nowSec: Math.floor(Date.now() / 1000)
   property bool dismissed: false
@@ -85,16 +86,16 @@ Item {
 
   FileView {
     id: stateFile
-    path: root.runtimeDir + "/state.json"
+    path: root.runtimeReady ? root.runtimeDir + "/state.json" : ""
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
     onLoaded: root.state = Omareel.parseJson(text(), { phase: "idle" })
-    onLoadFailed: root.state = { phase: "idle" }
+    onLoadFailed: { if (root.runtimeReady) root.state = { phase: "idle" } }
   }
 
   FileView {
-    path: root.runtimeDir
+    path: root.runtimeReady ? root.runtimeDir : ""
     watchChanges: true
     printErrors: false
     onFileChanged: stateFile.reload()
@@ -103,7 +104,12 @@ Item {
   Process {
     command: [root.cli, "status"]
     running: true
-    onExited: function() { stateFile.reload() }
+    stderr: StdioCollector { id: runtimeError; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.runtimeReady = exitCode === 0
+      if (root.runtimeReady) stateFile.reload()
+      else root.state = { phase: "error", error: String(runtimeError.text || "Cannot open private recording state.").trim() }
+    }
   }
 
   Timer {

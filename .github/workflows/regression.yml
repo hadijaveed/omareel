@@ -41,6 +41,8 @@ jobs:
           node tests/helpers.js
       - name: Test providers and HTTPS S3 integration
         run: python3 tests/upload-regression.py
+      - name: Test private runtime paths and atomic files
+        run: python3 tests/runtime-security.py
       - name: Test recording workflow
         run: python3 tests/workflow-regression.py
       - name: Test untrusted text rendering and loopback request isolation
