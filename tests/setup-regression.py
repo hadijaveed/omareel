@@ -91,44 +91,59 @@ gpu-screen-recorder(){ echo SHOULD_NOT_RUN; }; cmd_start area''')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
 
-    def test_link_never_overwrites_an_existing_command(self):
-        target = self.path / "omareel"
-        target.write_text("belongs to someone else")
-        result = self.shell('link_cli "$XDG_RUNTIME_DIR/omareel"')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(target.read_text(), "belongs to someone else")
-
     def test_shell_actions_only_use_native_quickshell_process_api(self):
         for name in ("BarWidget.qml", "Panel.qml"):
             source = (ROOT / name).read_text()
             self.assertNotIn("Util.execArgv", source)
             self.assertIn("Quickshell.execDetached", source)
 
-    def test_activate_links_once_and_notifies_once(self):
+    def cli_env(self):
         home = self.path / "home"
-        bindir = home / ".local/bin"
-        env = dict(self.env, HOME=str(home), PATH=str(bindir) + os.pathsep + self.env["PATH"])
-        result = subprocess.run(
-            ["bash", "-c", 'source "$1"; notify(){ echo "NOTICE:$*"; }; cmd_activate; cmd_activate',
-             "_", str(ROOT / "bin/omareel")],
-            env=env, capture_output=True, text=True, timeout=10,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((bindir / "omareel").resolve(), ROOT / "bin/omareel")
-        self.assertEqual(result.stdout.count("NOTICE:"), 1)
+        home.mkdir(exist_ok=True)
+        return dict(self.env, HOME=str(home),
+                    PATH=str(home / ".local/bin") + os.pathsep + self.env["PATH"])
 
-    def test_activate_preserves_an_unrelated_command(self):
-        home = self.path / "home"
-        bindir = home / ".local/bin"
-        bindir.mkdir(parents=True)
-        target = bindir / "omareel"
-        target.write_text("unrelated command")
-        result = subprocess.run(["bash", "-c", 'source "$1"; notify(){ :; }; cmd_activate',
-                                 "_", str(ROOT / "bin/omareel")],
-                                env=dict(self.env, HOME=str(home), PATH=str(bindir)+os.pathsep+self.env["PATH"]),
-                                capture_output=True, text=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(target.read_text(), "unrelated command")
+    def test_startup_commands_and_retired_activate_do_not_install_cli(self):
+        env = self.cli_env()
+        for args in (["status"], ["config", "get"], ["activate"]):
+            result = subprocess.run([str(ROOT / "bin/omareel"), *args], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2 if args == ["activate"] else 0, result.stderr)
+            self.assertFalse((Path(env["HOME"]) / ".local").exists())
+        source = (ROOT / "BarWidget.qml").read_text()
+        self.assertNotIn('"activate"', source)
+        self.assertIn('Install voice models & CLI shortcut', source)
+        # Setup is started by the explicit button, not component startup.
+        start = source.index('id: linkProc')
+        end = source.index('stdout:', start)
+        self.assertNotIn('running: true', source[start:end])
+
+    def test_explicit_link_is_idempotent(self):
+        env = self.cli_env()
+        target = Path(env["HOME"]) / ".local/bin/omareel"
+        for _ in range(2):
+            result = subprocess.run([str(ROOT / "bin/omareel"), "link"], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(target.resolve(), ROOT / "bin/omareel")
+            if _ == 0:
+                original = target.lstat()
+            else:
+                self.assertEqual(target.lstat(), original)
+
+    def test_setup_only_links_with_explicit_flag(self):
+        self.env = self.cli_env()
+        # No network/device probes: exercise production setup routing with
+        # deterministic successful capability/model setup commands.
+        prelude = """compatibility_report(){ echo '{"errors":[],"warnings":[]}'; };
+        timeout(){ return 0; }; denoise_engine(){ echo test; }; """
+        target = Path(self.env["HOME"]) / ".local/bin/omareel"
+        result = self.shell(prelude + 'cmd_setup')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(target.exists())
+        result = self.shell(prelude + 'cmd_setup --link')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.resolve(), ROOT / "bin/omareel")
 
     def test_invalid_settings_are_not_replaced(self):
         self.config.write_text("broken JSON")
@@ -185,6 +200,106 @@ gpu-screen-recorder(){ echo SHOULD_NOT_RUN; }; cmd_start area''')
             return code, out.replace(" ... ", " .. ")
         with patch.object(self, "fake_probe", side_effect=modern):
             self.assertTrue(self.report()["ready"])
+
+
+class LinkSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="omareel-link-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.bindir = self.home / ".local/bin"
+        self.bindir.mkdir(parents=True)
+        self.target = self.bindir / "omareel"
+        spec = importlib.util.spec_from_file_location("link_cli", ROOT / "bin/link-cli.py")
+        self.link = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.link)
+
+    def install(self):
+        self.link.install(str(ROOT / "bin/omareel"), str(self.home))
+
+    def test_existing_regular_file_is_untouched(self):
+        self.target.write_text("existing command")
+        with self.assertRaises(ValueError):
+            self.install()
+        self.assertEqual(self.target.read_text(), "existing command")
+
+    def test_existing_symlinks_including_broken_and_directory_are_untouched(self):
+        directory = self.home / "elsewhere"
+        directory.mkdir()
+        for destination in (directory, self.home / "missing", ROOT / "README.md"):
+            with self.subTest(destination=destination):
+                self.target.symlink_to(destination)
+                with self.assertRaises(ValueError):
+                    self.install()
+                self.assertEqual(os.readlink(self.target), str(destination))
+                self.assertFalse((directory / "omareel").exists())
+                self.target.unlink()
+
+    def test_symlinked_parent_directories_are_rejected(self):
+        for name in (".local/bin", ".local"):
+            with self.subTest(name=name):
+                original = self.home / name
+                redirected = self.home / "redirected"
+                original.rename(redirected)
+                original.symlink_to(redirected, target_is_directory=True)
+                with self.assertRaises(OSError):
+                    self.install()
+                self.assertFalse(list(redirected.rglob("omareel")))
+                original.unlink()
+                redirected.rename(original)
+
+    def test_symlinked_home_is_rejected(self):
+        alias = self.home / "alias"
+        alias.symlink_to(self.home, target_is_directory=True)
+        with self.assertRaises(OSError):
+            self.link.install(str(ROOT / "bin/omareel"), str(alias))
+        self.assertFalse(self.target.exists())
+
+    def test_shared_writable_directories_are_rejected(self):
+        for directory in (self.home, self.home / ".local", self.bindir):
+            for mode in (0o775, 0o757):
+                with self.subTest(directory=directory, mode=mode):
+                    directory.chmod(mode)
+                    try:
+                        with self.assertRaises(ValueError):
+                            self.install()
+                        self.assertFalse(self.target.exists())
+                    finally:
+                        directory.chmod(0o755)
+
+    @staticmethod
+    def foreign_owner(info):
+        fields = list(info)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+
+    def test_foreign_owned_directory_is_rejected(self):
+        original = os.fstat
+        with patch.object(self.link.os, "fstat", side_effect=lambda fd: self.foreign_owner(original(fd))):
+            with self.assertRaises(ValueError):
+                self.install()
+        self.assertFalse(self.target.exists())
+
+    def test_foreign_owned_correct_symlink_is_rejected(self):
+        self.target.symlink_to(ROOT / "bin/omareel")
+        original = os.stat
+        def foreign_entry(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            return self.foreign_owner(info) if kwargs.get("follow_symlinks") is False else info
+        with patch.object(self.link.os, "stat", side_effect=foreign_entry):
+            with self.assertRaises(ValueError):
+                self.install()
+        self.assertEqual(os.readlink(self.target), str(ROOT / "bin/omareel"))
+
+    def test_concurrently_created_conflict_is_not_overwritten(self):
+        original = os.symlink
+        def collision(*args, **kwargs):
+            self.target.write_text("created by another process")
+            return original(*args, **kwargs)
+        with patch.object(self.link.os, "symlink", side_effect=collision):
+            with self.assertRaises(ValueError):
+                self.install()
+        self.assertEqual(self.target.read_text(), "created by another process")
 
 
 if __name__ == "__main__":

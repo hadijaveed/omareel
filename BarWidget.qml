@@ -71,16 +71,6 @@ Panel {
   // (including Stop) fail at runtime.
   function cliRun(args) { Quickshell.execDetached([root.cli].concat(args)) }
 
-  // Omarchy deliberately does not run third-party install hooks.  Activate
-  // the CLI after the enabled widget first loads so keybindings always point
-  // at this checkout.  The command is idempotent and never overwrites an
-  // unrelated executable.
-  Process {
-    id: activateProc
-    command: [root.cli, "activate"]
-    running: true
-  }
-
   function start(kind) {
     if (root.busy || root.recording) return
     root.close()
@@ -1294,12 +1284,12 @@ Panel {
           Hint { opacity: 1; text: (root.doctor.errors || []).concat(root.doctor.warnings || []).join("\n"); visible: text.length > 0 }
           Hint {
             text: (root.doctor.linked === true ? "CLI on PATH: ~/.local/bin/omareel"
-                                                : "Put the CLI on your PATH so keybindings can call it:")
+                                                : "The setup action below downloads voice models and creates ~/.local/bin/omareel for keyboard shortcuts.")
           }
           Button {
             enabled: !linkProc.running && !root.busy && !root.recording
             iconText: "󰌷"
-            text: linkProc.running ? "Checking setup…" : "Check setup & install voice models"
+            text: linkProc.running ? "Checking setup…" : "Install voice models & CLI shortcut"
             onClicked: { root.message = "Checking this laptop…"; linkProc.running = true }
           }
           Hint {

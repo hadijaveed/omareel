@@ -86,10 +86,13 @@ omarchy plugin add https://github.com/hadijaveed/omareel.git --enable
 ~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel setup --link
 ```
 
-When the enabled bar widget first loads, it safely links its CLI at
-`~/.local/bin/omareel` and sends one **Omareel is ready** notification. It
-never overwrites an unrelated command. `setup` checks dependencies and
-downloads pinned, checksum-verified RNNoise models. Then add a keybinding
+Loading or enabling the bar does not install the CLI shortcut. The bar controls,
+including Stop, call the bundled CLI directly and work without it.
+`setup` checks dependencies and downloads pinned, checksum-verified RNNoise
+models; `--link` explicitly creates `~/.local/bin/omareel`. To install only the
+shortcut, run `~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel link`.
+You can also choose **Install voice models & CLI shortcut** in Settings.
+Then add a keybinding
 in `~/.config/hypr/bindings.lua`:
 
 ```lua
@@ -138,9 +141,11 @@ installed plugin files: local modifications can prevent a fast-forward update.
 If the shell still displays an older launcher after an update, run
 `omarchy restart shell` once while no recording is active; this reloads the
 bar/panels without closing your applications.
-Automatic CLI activation refuses to overwrite an unrelated command. If its
-notification reports a conflict, inspect and move that existing command aside
-yourself, then run `~/.config/omarchy/plugins/hadijaveed.omareel/bin/omareel link`.
+Explicit CLI installation never replaces an existing entry. It requires your
+home, `.local`, and `bin` directories to be owned by you, not writable by other
+users, and not symlinks. If linking reports a conflict or unsafe directory,
+inspect the path and its ownership yourself before retrying; do not use `sudo`.
+An existing correct, user-owned shortcut is kept as-is.
 For removal, use `omarchy plugin remove hadijaveed.omareel`; your recordings,
 models, settings, credentials and optional CLI symlink are not deleted by us.
 Remove the now-dangling symlink manually if you no longer want it.

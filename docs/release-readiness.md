@@ -12,11 +12,19 @@ on each supported hardware family before broad certification.
 
 - Quattro compatibility hotfix (0.9.2): Stop and other action buttons use the
   native `Quickshell.execDetached(argv)` API available on Quattro 4.0.0 instead
-  of depending on the newer Commons helper. First widget load safely creates
-  the CLI link without replacing another command or changing keybindings.
+  of depending on the newer Commons helper. The bar calls the bundled CLI
+  directly; loading it does not install a command on PATH.
   Stop and Toggle recover a saved raw take when the recorder has already exited.
   Setup tests forbid the unsupported helper, and workflow tests recover an
   actual synthetic MP4 without signaling an unrelated PID.
+
+- 0.9.2 review correction: removed the automatic activation process and its CLI
+  command. CLI shortcut installation requires an explicit `link`, `setup --link`,
+  or the clearly labeled Settings action. It uses checked directory descriptors,
+  rejects symlinked, foreign-owned or group/world-writable directories, and never
+  overwrites an existing entry. Tests cover normal startup commands, the retired
+  activation command, repeated explicit installation, conflicts and unsafe paths.
+  This correction does not include Studio or change the existing release tag.
 
 - Marketplace security follow-up (0.9.1): all owned QML text sinks explicitly use PlainText. Shared Hint covers process output and endpoint errors. Local native-style dropdown/toggle variants protect device/config labels, and the upload tooltip no longer interpolates a destination through an upstream AutoText sink. Qt regression verifies literal error rendering, zero protected-sink loopback image requests, and a working vulnerable positive control.
 
