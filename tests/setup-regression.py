@@ -147,7 +147,7 @@ gpu-screen-recorder(){ echo SHOULD_NOT_RUN; }; cmd_start area''')
 
     def test_invalid_settings_are_not_replaced(self):
         self.config.write_text("broken JSON")
-        result = subprocess.run([str(ROOT / "bin/omareel"), "status"], env=self.env, capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / "bin/omareel"), "config", "get"], env=self.env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid settings JSON", result.stderr)
         self.assertEqual(self.config.read_text(), "broken JSON")
