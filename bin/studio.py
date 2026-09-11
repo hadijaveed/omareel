@@ -428,8 +428,8 @@ def main():
         print(json.dumps(prepare_camera(source,local_file(args.settings),json.loads(args.camera_settings))))
         return
     opts = options(json.loads(args.settings))
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omareel"
-    runtime.mkdir(exist_ok=True, parents=True)
+    runtime = Path(subprocess.check_output(
+        [sys.executable, str(Path(__file__).with_name("runtime.py")), "init"], text=True).strip())
     # Exports stage on the destination filesystem. A completed file appears
     # atomically under a new UUID, never replacing the input or another export.
     parent = runtime if args.action == "preview" else source.parent

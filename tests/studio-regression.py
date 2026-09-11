@@ -192,12 +192,14 @@ class StudioRegression(unittest.TestCase):
         self.assertEqual(events[1]["start"],4)
 
     def test_click_capture_records_only_active_in_region_points(self):
-        session=self.path/"click-session.json"
-        events=self.path/"events.jsonl"
+        runtime_path=self.path/"omareel"
+        runtime_path.mkdir(mode=0o700)
+        session=runtime_path/"11111111-1111-1111-1111-111111111111.click-session.json"
+        events=runtime_path/"11111111-1111-1111-1111-111111111111.click-events.jsonl"
         state=dict(token="test-token",active=True,pid=os.getpid(),pidStart=clickzoom.process_start(os.getpid()),
                    started=100,region=[-100,50,200,100],events=str(events))
         session.write_text(json.dumps(state))
-        with patch.object(clickzoom.time,"time",return_value=100.6):
+        with patch.dict(os.environ,self.env), patch.object(clickzoom.time,"time",return_value=100.6):
             clickzoom.emit(str(session),"test-token",-50,100)
             clickzoom.emit(str(session),"test-token",150,100) # outside recorded area
             clickzoom.emit(str(session),"other-token",-50,100)
@@ -209,6 +211,36 @@ class StudioRegression(unittest.TestCase):
             clickzoom.emit(str(session),"test-token",-50,100)
         data=[json.loads(line) for line in events.read_text().splitlines()]
         self.assertEqual(data,[dict(time=.5,x=.25,y=.5)])
+
+    def test_click_capture_refuses_redirected_session_and_event_files(self):
+        folder=self.path/"omareel"
+        folder.mkdir(mode=0o700)
+        session=folder/"11111111-1111-1111-1111-111111111111.click-session.json"
+        events=folder/"11111111-1111-1111-1111-111111111111.click-events.jsonl"
+        state=dict(token="test",active=True,pid=os.getpid(),pidStart=clickzoom.process_start(os.getpid()),
+                   started=100,region=[0,0,200,100],events=str(events))
+        victim=self.path/"outside.json"
+        victim.write_text(json.dumps(state))
+        original=victim.read_bytes()
+        with patch.dict(os.environ,self.env), patch.object(clickzoom.time,"time",return_value=100.6):
+            session.symlink_to(victim)
+            clickzoom.emit(str(session),"test",50,50)
+            self.assertFalse(events.exists())
+            session.unlink()
+            session.write_text(json.dumps(state))
+            events.symlink_to(victim)
+            clickzoom.emit(str(session),"test",50,50)
+            self.assertEqual(victim.read_bytes(),original)
+            self.assertTrue(events.is_symlink())
+
+    def test_studio_preview_refuses_symlinked_runtime(self):
+        outside=self.path/"outside"
+        outside.mkdir()
+        (self.path/"omareel").symlink_to(outside,target_is_directory=True)
+        result=self.render(action="preview",check=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(list(outside.iterdir()),[])
+        self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(),self.digest)
 
     def test_corners_are_antialiased_and_shadow_fades_inside_canvas(self):
         opts = studio.options({})
