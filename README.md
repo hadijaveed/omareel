@@ -361,8 +361,17 @@ If settings become missing or invalid during a recording, Stop still saves local
 without voice cleanup, retains the raw take and shows a warning. It leaves the
 settings untouched so you can restore them before recording again.
 
+Runtime and settings inputs have fixed byte limits: 1 MiB for JSON/settings,
+64 bytes for PID files, 4 MiB for logs, and 8 MiB for other runtime files such as
+camera masks. Oversized reads and writes fail before parsing or replacement.
+Logs stream in 64 KiB chunks and restart at the cap, retaining new output without
+interrupting recording. Both UI state readers enforce these limits on every update.
+These limits apply to helper data, not recorded videos.
+
 ### Regression checks
 
+Run `python3 tests/runtime-limits.py` for oversized files/pipes under a memory
+ceiling, growing-file races, boundary values and concurrent log rotation.
 Run `python3 tests/settings-security.py` for settings path attacks, atomic-write
 failures and Stop recovery with unusable settings.
 Run `python3 tests/audio-regression.py` for local DSP tests (FFmpeg and the

@@ -43,6 +43,8 @@ jobs:
         run: python3 tests/upload-regression.py
       - name: Test private runtime paths and atomic files
         run: python3 tests/runtime-security.py
+      - name: Test bounded runtime files and streams
+        run: python3 tests/runtime-limits.py
       - name: Test safe settings and Stop recovery
         run: python3 tests/settings-security.py
       - name: Test recording workflow
