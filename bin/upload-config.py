@@ -15,6 +15,7 @@ from urllib.parse import quote, urlsplit
 sys.dont_write_bytecode = True
 
 from settings import Settings
+from runtime import MAX_JSON_BYTES, read_limited
 
 
 MANAGED = {"s3", "r2", "b2", "s3compat"}
@@ -79,7 +80,11 @@ def destination(upload):
 
 def read_remotes(path):
     cp = configparser.RawConfigParser()
-    cp.read(path)
+    try:
+        with open(path, "rb") as source:
+            cp.read_string(read_limited(source, MAX_JSON_BYTES).decode())
+    except FileNotFoundError:
+        pass
     return cp
 
 
@@ -163,7 +168,8 @@ def save(upload, path):
 
 def main():
     action, config, conf, *args = sys.argv[1:]
-    upload = json.loads(Path(config).read_text()).get("upload", {})
+    with open(config, "rb") as source:
+        upload = json.loads(read_limited(source, MAX_JSON_BYTES)).get("upload", {})
     path = Path(conf)
     if action == "status":
         print(json.dumps(status(upload, path)))

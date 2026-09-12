@@ -11,6 +11,10 @@ import sys
 import tempfile
 from urllib.request import urlopen
 
+sys.dont_write_bytecode = True
+
+from runtime import MAX_JSON_BYTES, read_limited
+
 MODEL_REV = "3eee541a283fd3b8f81b85b1748e3b9ccbefa04d"
 MODELS = {
     "bd": ("beguiling-drafter-2018-08-30/bd.rnnn", "ae3f7411e1e6a884f839a4a145c394408398f09854dbc1216ee02faafc98a17b"),
@@ -203,11 +207,12 @@ def install_models(directory):
 
 def main():
     if sys.argv[1] == "camera":
-        print(json.dumps(choose_camera(sys.stdin.read())))
+        print(json.dumps(choose_camera(read_limited(sys.stdin.buffer, MAX_JSON_BYTES).decode())))
     elif sys.argv[1] == "models":
         return install_models(Path(sys.argv[2]))
     else:
-        config = json.loads(Path(sys.argv[2]).read_text())
+        with open(sys.argv[2], "rb") as source:
+            config = json.loads(read_limited(source, MAX_JSON_BYTES))
         if not isinstance(config, dict):
             raise ValueError("Settings must be a JSON object")
         # CLI overrides reflect the actual take, not stale saved settings.

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bin"))
 spec = importlib.util.spec_from_file_location("system_check", ROOT / "bin/system-check.py")
 system = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(system)

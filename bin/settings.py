@@ -7,7 +7,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from runtime import Runtime, open_base
+from runtime import MAX_JSON_BYTES, Runtime, open_base, read_limited
 
 
 def object_json(data):
@@ -48,6 +48,10 @@ class Settings(Runtime):
     def value(self):
         return object_json(self.read(self.filename))
 
+    def limit(self, name):
+        self.name(name)
+        return MAX_JSON_BYTES
+
     def update(self, action, supplied):
         with self.locked(self.filename + ".lock"):
             exists = self.inspect(self.filename)
@@ -64,7 +68,7 @@ class Settings(Runtime):
 
 def main():
     path, action = sys.argv[1:]
-    supplied = object_json(sys.stdin.buffer.read()) if action in ("ensure", "merge") else None
+    supplied = object_json(read_limited(sys.stdin.buffer, MAX_JSON_BYTES)) if action in ("ensure", "merge") else None
     store = Settings(path, create=action == "ensure")
     try:
         value = store.value() if action == "read" else store.update(action, supplied)

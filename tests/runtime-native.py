@@ -6,6 +6,7 @@ from pathlib import Path
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +23,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omareel-runtime-native-") as directory:
         for filename in ("BarWidget.qml", "Panel.qml"):
             source = (ROOT / filename).read_text()
-            for unsafe in (False, True):
-                work = Path(directory) / (filename + ("-unsafe" if unsafe else "-normal"))
+            modes = ["normal", "symlink-start", "large-start", "large-later", "symlink-later"]
+            if "studioOfferedFile" in source:
+                modes.append("studio-done")
+            for mode in modes:
+                unsafe = mode.endswith("-start")
+                late = mode.endswith("-later")
+                work = Path(directory) / (filename + "-" + mode)
                 work.mkdir(mode=0o700)
                 # Broken settings must not hide Stop/state on shell startup.
                 (work / "config.json").write_text("broken JSON")
@@ -32,13 +38,24 @@ def main():
                 victim.write_text('{"phase":"done","id":"planted"}')
                 if unsafe:
                     runtime.mkdir(mode=0o700)
-                    (runtime / "state.json").symlink_to(victim)
+                    if mode == "symlink-start":
+                        (runtime / "state.json").symlink_to(victim)
+                    else:
+                        with (runtime / "state.json").open("wb") as out:
+                            out.truncate(8 * 1024**3)
                 shutil.copyfile(ROOT / "Omareel.js", work / "Omareel.js")
-                startup = enclosing(source, 'command: [root.cli, "status"]', "Process")
-                state = enclosing(source, "id: stateFile", "FileView")
+                startup = enclosing(source, 'running: true\n    stderr: StdioCollector { id: runtimeError', "Process")
+                state = enclosing(source, "id: stateFile", "Process")
                 watcher = enclosing(source, 'path: root.runtimeReady ? root.runtimeDir : ""', "FileView")
                 command = ["bash", "-c", 'source "$1"; omarchy-shell(){ :; }; set_state done id=native-test',
                            "_", str(ROOT / "bin/omareel")]
+                if mode == "studio-done":
+                    command[2] += " file=fixture.mp4 studioEnabled=true"
+                if late:
+                    operation = ("p.unlink(); p.symlink_to(sys.argv[2])" if mode == "symlink-later"
+                                 else "f=p.open('wb'); f.truncate(8*1024**3); f.close()")
+                    command = [sys.executable, "-c", "import sys; from pathlib import Path; p=Path(sys.argv[1]); " + operation,
+                               str(runtime / "state.json"), str(victim)]
                 (work / "shell.qml").write_text('''import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -53,6 +70,9 @@ ShellRoot {
     property string message: ""
     property bool readPlanted: false
     property bool startedWrite: false
+    property string studioOfferedFile: ""
+    property string openedStudioFile: ""
+    function openStudio(file) { openedStudioFile = file }
     onStateChanged: { if (state.id === "planted") readPlanted = true }
     QtObject { id: configFile; function reload() {} }
     __STATE__
@@ -71,7 +91,11 @@ ShellRoot {
         } else if (root.runtimeReady && !root.startedWrite) {
           root.startedWrite = true
           update.running = true
-        } else if (root.state.id === "native-test") {
+        } else if (__LATE__ && root.state.phase === "error") {
+          if (root.readPlanted || !root.runtimeReady) console.error("UNSAFE RUNTIME READ")
+          else console.log("RUNTIME NATIVE PASS")
+          Qt.quit()
+        } else if (root.state.id === "native-test" && (!__STUDIO__ || root.openedStudioFile === "fixture.mp4")) {
           console.log("RUNTIME NATIVE PASS")
           Qt.quit()
         }
@@ -83,7 +107,7 @@ ShellRoot {
 '''.replace("__CLI__", json.dumps(str(ROOT / "bin/omareel")))
                     .replace("__RUNTIME__", json.dumps(str(runtime))).replace("__STATE__", state)
                     .replace("__WATCHER__", watcher).replace("__STARTUP__", startup)
-                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()))
+                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()).replace("__LATE__", str(late).lower()).replace("__STUDIO__", str(mode == "studio-done").lower()))
                 env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
                            QT_QUICK_CONTROLS_STYLE="Basic", QT_QPA_PLATFORMTHEME="", XDG_RUNTIME_DIR=str(work),
                            XDG_CACHE_HOME=str(work / "cache"), OMAREEL_CONFIG=str(work / "config.json"))
@@ -94,7 +118,7 @@ ShellRoot {
                 for error in ("ReferenceError", "TypeError", "Failed to load configuration", "UNSAFE RUNTIME READ"):
                     assert error not in logs, logs
                 assert victim.read_text() == '{"phase":"done","id":"planted"}'
-                print("PASS:", filename, "unsafe startup rejected" if unsafe else "startup and atomic state watcher")
+                print("PASS:", filename, mode)
 
 
 if __name__ == "__main__":
