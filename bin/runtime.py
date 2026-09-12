@@ -14,6 +14,29 @@ import time
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 KNOWN_FILES = ("state.json", "state.lock", "operation.lock", "omareel.log", "gsr.pid", "cam.pid")
+MAX_JSON_BYTES = 1024 * 1024
+MAX_LOG_BYTES = 4 * 1024 * 1024
+MAX_FILE_BYTES = 8 * 1024 * 1024
+CHUNK_BYTES = 64 * 1024
+
+
+def check_size(size, limit):
+    if size > limit:
+        raise ValueError(f"input exceeds the {limit}-byte limit")
+
+
+def read_limited(source, limit):
+    """Reject large regular files before allocation; also bound pipes/growth.
+
+    The extra byte detects overflow without waiting for EOF on an oversized
+    pipe. Never size an allocation from untrusted metadata.
+    """
+    info = os.fstat(source.fileno())
+    if stat.S_ISREG(info.st_mode):
+        check_size(info.st_size, limit)
+    data = source.read(limit + 1)
+    check_size(len(data), limit)
+    return data
 
 
 def check_owner(info, directory=False):
@@ -123,9 +146,20 @@ class Runtime:
 
     def read(self, name):
         with os.fdopen(self.open(name, os.O_RDONLY), "rb") as source:
-            return source.read()
+            return read_limited(source, self.limit(name))
+
+    def limit(self, name):
+        name = self.name(name)
+        if name.endswith(".json"):
+            return MAX_JSON_BYTES
+        if name.endswith(".log"):
+            return MAX_LOG_BYTES
+        if name.endswith(".pid"):
+            return 64
+        return MAX_FILE_BYTES
 
     def write(self, name, data):
+        check_size(len(data), self.limit(name))
         self.inspect(name)
         temporary = ".write-" + secrets.token_hex(16)
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -143,11 +177,39 @@ class Runtime:
             except FileNotFoundError:
                 pass
 
+    def append_stream(self, name, source):
+        # Log producers may stream for hours. Drain in fixed-size chunks and
+        # rotate the same checked inode under flock, keeping disk use bounded
+        # without closing the producer's pipe or retaining a recording lock.
+        if not self.name(name).endswith(".log"):
+            raise ValueError("stream append is only supported for logs")
+        fd = self.open(name, os.O_WRONLY | os.O_APPEND, create=True)
+        try:
+            os.fchmod(fd, 0o600)
+            while data := os.read(source, CHUNK_BYTES):
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    check_owner(os.fstat(fd))
+                    if os.fstat(fd).st_size + len(data) > self.limit(name):
+                        os.ftruncate(fd, 0)
+                    view = memoryview(data)
+                    while view:
+                        view = view[os.write(fd, view):]
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     def initialize(self):
         for name in KNOWN_FILES:
             self.inspect(name)
         with self.locked("state.lock"):
-            if not self.inspect("state.json"):
+            if self.inspect("state.json"):
+                # The shell reads state after init succeeds. Refuse an already
+                # oversized state here too, before enabling those watchers.
+                with os.fdopen(self.open("state.json", os.O_RDONLY), "rb") as state:
+                    check_size(os.fstat(state.fileno()).st_size, self.limit("state.json"))
+            else:
                 self.write("state.json", json.dumps({"phase": "idle", "updatedAt": int(time.time())}).encode())
 
 
@@ -161,7 +223,7 @@ def main():
         elif action == "read":
             sys.stdout.buffer.write(runtime.read(args[0]))
         elif action == "write":
-            data = sys.stdin.buffer.read()
+            data = read_limited(sys.stdin.buffer, runtime.limit(args[0]))
             if args[0] == "state.json":
                 if not isinstance(json.loads(data), dict):
                     raise ValueError("state must be a JSON object")
@@ -170,15 +232,7 @@ def main():
             else:
                 runtime.write(args[0], data)
         elif action == "append":
-            fd = runtime.open(args[0], os.O_WRONLY | os.O_APPEND, create=True)
-            try:
-                os.fchmod(fd, 0o600)
-                while data := os.read(0, 65536):
-                    view = memoryview(data)
-                    while view:
-                        view = view[os.write(fd, view):]
-            finally:
-                os.close(fd)
+            runtime.append_stream(args[0], 0)
         elif action == "locked":
             with runtime.locked("operation.lock", nonblocking=True):
                 # The child cannot inherit the lock; background recorder/camera

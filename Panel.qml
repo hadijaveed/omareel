@@ -84,14 +84,24 @@ Item {
     if (phase !== "done") titling = false
   }
 
-  FileView {
+  // All state updates pass through the bounded, no-follow reader, including
+  // files changed after startup. The FileView below only watches a directory.
+  Process {
     id: stateFile
-    path: root.runtimeReady ? root.runtimeDir + "/state.json" : ""
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.state = Omareel.parseJson(text(), { phase: "idle" })
-    onLoadFailed: { if (root.runtimeReady) root.state = { phase: "idle" } }
+    property bool pending: false
+    function reload() {
+      if (!root.runtimeReady) return
+      if (running) pending = true
+      else running = true
+    }
+    command: [root.cli, "status"]
+    stdout: StdioCollector { id: stateOutput; waitForEnd: true }
+    stderr: StdioCollector { id: stateError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.state = Omareel.parseJson(stateOutput.text, { phase: "idle" })
+      else root.state = { phase: "error", error: String(stateError.text || "Cannot read recording state.").trim() }
+      if (pending) { pending = false; reload() }
+    }
   }
 
   FileView {
