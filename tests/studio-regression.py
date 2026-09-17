@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -47,6 +48,38 @@ class StudioRegression(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             return json.loads(result.stdout)
         return result
+
+    def test_legacy_filter_file_option_preserves_preview_and_export(self):
+        # Exercise the fallback on a modern developer machine too; CI's older
+        # FFmpeg executes the legacy option directly in the full render suite.
+        real_ffmpeg = shutil.which("ffmpeg")
+        wrapper = self.path / "compat-bin"
+        wrapper.mkdir()
+        calls = self.path / "compat-calls.jsonl"
+        script = wrapper / "ffmpeg"
+        script.write_text("#!/usr/bin/env python3\nimport json,os,sys\n"
+            + f"with open({str(calls)!r}, 'a') as out: out.write(json.dumps(sys.argv[1:])+'\\n')\n"
+            + "if '-/filter_complex' in sys.argv:\n"
+              "    print(\"Unrecognized option '/filter_complex'.\",file=sys.stderr)\n"
+              "    sys.exit(1)\n"
+              "if '-filter_complex_script' in sys.argv:\n"
+              "    sys.argv[sys.argv.index('-filter_complex_script')]='-/filter_complex'\n"
+            + f"os.execv({real_ffmpeg!r},[{real_ffmpeg!r},*sys.argv[1:]])\n")
+        # On CI the actual older binary supports the legacy syntax already.
+        help_text = subprocess.check_output([real_ffmpeg,"-hide_banner","-h","full"], stderr=subprocess.DEVNULL).decode()
+        if "-filter_complex_script" in help_text:
+            script.write_text(script.read_text().replace(
+                "if '-filter_complex_script' in sys.argv:\n    sys.argv[sys.argv.index('-filter_complex_script')]='-/filter_complex'\n", ""))
+        script.chmod(0o700)
+        self.env["PATH"] = str(wrapper) + os.pathsep + self.env["PATH"]
+        preview = self.render("preview")
+        exported = self.render()
+        self.assertTrue(Path(preview["file"]).exists())
+        self.assertEqual(self.packets(self.video), self.packets(Path(exported["file"])))
+        self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(), self.digest)
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(sum("-/filter_complex" in args for args in commands), 2)
+        self.assertEqual(sum("-filter_complex_script" in args for args in commands), 2)
 
     def helper(self, script, *args, check=True):
         result = subprocess.run(["bash","-c",'source "$1"; shift; omarchy-shell(){ :; }; notify(){ :; }; '

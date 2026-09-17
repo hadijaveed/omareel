@@ -1,17 +1,25 @@
 # Omareel — screen recording, sharing, and Studio for Omarchy
 
-**Record a walkthrough. Share a link. Add a little polish when you want it.**
+**Record your screen. Share a link. Make a polished demo when you need one.**
 
 [Install](#install) · [Record and share](#record-and-share) · [Studio](#give-your-recording-a-studio-finish) · [Hosting guide](docs/upload-providers.md)
 
 Omareel is an open-source screen recorder for [Omarchy](https://omarchy.org).
-Record an **area**, a **window**, or your **screen** with your camera and chosen
-microphone. Clean up the background noise, save the video, and share a link
-from storage you control. It's a simple Loom-style workflow, right from your bar.
+Record an **area**, a **window**, or your **screen**, with optional camera,
+microphone, and system audio. Reduce background noise, save the video locally,
+and share a link from storage you control. Send a quick update, explain a bug,
+or walk someone through your work—right from your bar.
 
-For a product demo or tutorial that needs a finished look, turn on **Studio**:
-add click zooms, choose a background and frame, and export a styled copy.
-You can also leave Studio off and go straight from recording to sharing.
+For everyday walkthroughs and video messages, Omareel offers a
+[Loom](https://www.loom.com/)-style recording and sharing workflow on Omarchy.
+Your saved recordings stay in a library where you can reopen, rename, upload,
+or copy a link. There is no editing step required.
+
+When a demo or tutorial needs more polish, optional **Studio** adds
+[Screen Studio](https://screen.studio/)-style finishing: zoom toward clicks,
+choose a background and frame, adjust spacing, and export a separate styled
+copy. These are the workflows Omareel aims to replace on Omarchy; it does not
+offer every feature of either product. Studio is currently a development preview.
 
 No Omareel account or subscription is required. Keep your recordings locally,
 use your existing cloud bucket, or host the video and player page yourself.
@@ -81,6 +89,11 @@ the video. Viewers open a link in their browser.
 Use a domain you own by configuring it on your storage or CDN. Omareel handles
 the upload; you choose the storage and configure access. You can also keep
 everything local. [Hosting and sharing](#sharing-setup) explains the options.
+
+Generated player pages include a `noindex` directive for search engines that
+honor it. This is not access control: anyone with a public link can open or
+redistribute it, and other crawlers may ignore the directive. Keep sensitive
+recordings local or use storage with appropriate access restrictions.
 
 ## Give your recording a Studio finish
 

@@ -409,7 +409,18 @@ def render(source, opts, directory, preview=False):
     else:
         command += ["-map", "0:a?", "-c:a", "copy", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                     "-threads", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t", str(info["duration"])]
-    run(command + [str(target)], 60 if preview else None)
+    timeout = 60 if preview else None
+    try:
+        run(command + [str(target)], timeout)
+    except ValueError as error:
+        # Older FFmpeg (including Ubuntu 24.04's 6.1) predates the generic
+        # -/option file syntax. Retry only its argument-parser rejection,
+        # before any render/output was started. Keep graphs in a file: a long
+        # recording's click expressions can exceed the OS argv length limit.
+        if "Unrecognized option '/filter_complex'" not in str(error):
+            raise
+        command[command.index("-/filter_complex")] = "-filter_complex_script"
+        run(command + [str(target)], timeout)
     return target, geo
 
 
