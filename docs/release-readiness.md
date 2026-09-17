@@ -2,8 +2,10 @@
 
 ## Scope
 
-0.9.3 Studio is in development on `feat/studio-mode`. Release requires 0.9.2
-marketplace approval, testing on multiple physical laptops, and Hadi's approval.
+0.9.3 Studio is in development on `feat/studio-mode`. The 0.9.2 marketplace
+update was approved and published on September 16, 2026 ([confirmation](https://github.com/omacom/omarchy-plugin-marketplace/issues/5763#issuecomment-5694530303)).
+The remaining release requirements are testing on multiple physical laptops
+and Hadi's approval of picture, camera, zoom and voice quality.
 See the [candidate test plan](0.9.3-testing.md) and [positioning brief](positioning.md).
 
 0.9.2 remains the public Omarchy 4 beta, not a promise of universal laptop compatibility.

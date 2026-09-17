@@ -20,7 +20,8 @@ Storage providers may charge for their service. Maintained by
 [hadijaveed/omareel](https://github.com/hadijaveed/omareel).
 
 > **0.9.3 development preview.** The recording and sharing workflow is available
-> in [0.9.2](https://github.com/hadijaveed/omareel/releases/tag/v0.9.2).
+> in the [verified 0.9.2 marketplace update](https://omarchyplugins.com/plugin.html?id=hadijaveed.omareel),
+> approved and published on September 16, 2026.
 > Studio is being tested on this branch and is not yet published.
 > [Testing and release plan](docs/0.9.3-testing.md).
 

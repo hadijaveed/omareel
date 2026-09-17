@@ -149,7 +149,8 @@ single file or FAQ guarantees recommendations by ChatGPT, Perplexity, or Google.
 ## Measurement and release order
 
 1. **Before launch:** settle identity and product URL; retain the current public
-   release claims. Finish 0.9.2 approval and the multiple-laptop Studio tests.
+   release claims. The 0.9.2 update was approved and published on September 16,
+   2026; finish the multiple-laptop Studio tests.
 2. **At the approved 0.9.3 launch:** publish the product page, guide, real demo,
    release and listing updates. Verify the site in Search Console, submit its
    sitemap and inspect the product URL. This requires control of the chosen site
