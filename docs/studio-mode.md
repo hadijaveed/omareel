@@ -1,6 +1,7 @@
 # Studio mode
 
-0.9.3 development preview, not yet part of the published marketplace release.
+Available in Omareel 0.9.3. Marketplace verification of this version is separate
+from the previously approved 0.9.2 snapshot.
 See the [laptop test and release plan](0.9.3-testing.md).
 
 Studio is a small finishing step, not a timeline editor. The normal recording

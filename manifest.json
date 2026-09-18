@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "hadijaveed.omareel",
   "name": "Omareel",
-  "version": "0.9.3-dev",
+  "version": "0.9.3",
   "author": "hadijaveed",
   "homepage": "https://github.com/hadijaveed/omareel",
-  "description": "Make polished product demos on Omarchy. Record your screen and camera, zoom on clicks, and finish with Studio backgrounds and frames. Keep the MP4 locally or share a player page from your own storage.",
+  "description": "Record your screen, camera, and voice on Omarchy. Save locally or share a link from your own storage. Optional Studio adds click zooms, backgrounds, and frames for polished demos and tutorials.",
   "kinds": [
     "panel",
     "bar-widget"
@@ -19,7 +19,16 @@
     "displayName": "Omareel",
     "description": "Record, style, and share from the Omarchy bar.",
     "category": "System",
-    "aliases": ["omareel", "record", "screenrecord", "loom", "studio", "screencast", "screen-recorder", "demo"],
+    "aliases": [
+      "omareel",
+      "record",
+      "screenrecord",
+      "loom",
+      "studio",
+      "screencast",
+      "screen-recorder",
+      "demo"
+    ],
     "allowMultiple": false,
     "defaultSection": "right"
   }

@@ -19,7 +19,7 @@ When a demo or tutorial needs more polish, optional **Studio** adds
 [Screen Studio](https://screen.studio/)-style finishing: zoom toward clicks,
 choose a background and frame, adjust spacing, and export a separate styled
 copy. These are the workflows Omareel aims to replace on Omarchy; it does not
-offer every feature of either product. Studio is currently a development preview.
+offer every feature of either product. Studio is optional in version 0.9.3.
 
 No Omareel account or subscription is required. Keep your recordings locally,
 use your existing cloud bucket, or host the video and player page yourself.
@@ -27,11 +27,10 @@ Storage providers may charge for their service. Maintained by
 [Hadi Javeed](https://github.com/hadijaveed) at
 [hadijaveed/omareel](https://github.com/hadijaveed/omareel).
 
-> **0.9.3 development preview.** The recording and sharing workflow is available
-> in the [verified 0.9.2 marketplace update](https://omarchyplugins.com/plugin.html?id=hadijaveed.omareel),
-> approved and published on September 16, 2026.
-> Studio is being tested on this branch and is not yet published.
-> [Testing and release plan](docs/0.9.3-testing.md).
+> **Version 0.9.3 adds optional Studio.** [Release notes](docs/0.9.3-release.md).
+> The marketplace currently verifies the 0.9.2 snapshot; the 0.9.3 update needs
+> its own maintainer review. [Marketplace listing](https://omarchyplugins.com/plugin.html?id=hadijaveed.omareel)
+> · [Tested coverage and limitations](docs/0.9.3-testing.md).
 
 ## Record and share
 
@@ -97,7 +96,7 @@ recordings local or use storage with appropriate access restrictions.
 
 ## Give your recording a Studio finish
 
-**Optional in the 0.9.3 development preview.** Start with the same recorder,
+**Optional in version 0.9.3.** Start with the same recorder,
 then use Studio when you want click zooms, a background, and a frame. Your
 original stays in Recordings, and Studio exports a separate MP4.
 
@@ -159,9 +158,9 @@ for every Arch desktop, Ubuntu, GNOME, or KDE. See the
 
 ### Can I make screen recordings with automatic zoom?
 
-The 0.9.3 development branch adds **Zoom on clicks** in Studio. Enable it before
+Version 0.9.3 adds **Zoom on clicks** in Studio. Enable it before
 recording; the styled export zooms toward your clicks and returns to the full
-view. The public 0.9.2 release does not include Studio or click zoom.
+view. The older 0.9.2 marketplace snapshot does not include Studio or click zoom.
 
 ### Is Omareel an alternative to Screen Studio on Omarchy?
 
@@ -226,7 +225,7 @@ and atomic replacement. There is no shared `/tmp/omareel` fallback: run the CLI
 from your Omarchy desktop session. An unsafe-path error leaves the conflicting
 entry untouched; inspect the reported path rather than running with `sudo`.
 
-### Install the public release (0.9.2)
+### Install Omareel (current upstream)
 
 ```bash
 omarchy plugin add https://github.com/hadijaveed/omareel.git --enable
@@ -526,7 +525,7 @@ Logs stream in 64 KiB chunks and restart at the cap, retaining new output withou
 interrupting recording. Both UI state readers enforce these limits on every update.
 These limits apply to helper data, not recorded videos.
 
-The Studio preview also bounds recording-library metadata: 8 MiB per index,
+Studio also bounds recording-library metadata: 8 MiB per index,
 1 MiB per entry, and 64 bytes for camera timestamps. Library reads and updates
 use checked files, locks, and atomic replacement; the library UI reads through
 the bounded helper. Studio subprocess output has a 1 MiB stdout limit and
