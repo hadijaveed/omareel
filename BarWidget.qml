@@ -6,7 +6,7 @@ import qs.Ui
 import "Omareel.js" as Omareel
 
 // Bar launcher for Omareel: a record glyph (with a live timer while recording)
-// that opens a Loom-style start panel — pick Area / Window / Screen, choose
+// that opens the recording panel — pick Area / Window / Screen, choose
 // microphone, system-audio source and webcam, flip noise removal and upload,
 // and a settings page (gear) for recording quality and the upload destination
 // (Cloudflare R2, AWS S3, Backblaze B2, any S3 endpoint, or an existing
@@ -33,7 +33,7 @@ Panel {
   property var doctor: ({})
   property int nowSec: Math.floor(Date.now() / 1000)
 
-  property string page: "launcher" // launcher | settings | recordings
+  property string page: "launcher" // launcher | settings | recordings | studio
   property var recordings: []       // index.jsonl, newest first
   property string selectedFile: ""  // expanded row on the recordings page
   property string draftName: ""     // rename field on the recordings page
@@ -46,7 +46,7 @@ Panel {
 
   readonly property string phase: Omareel.phaseOf(state)
   readonly property bool recording: phase === "recording"
-  readonly property bool busy: startProc.running || phase === "picking" || phase === "starting" || phase === "processing" || phase === "uploading"
+  readonly property bool busy: studioColumn.exporting || startProc.running || phase === "picking" || phase === "starting" || phase === "processing" || phase === "uploading"
   readonly property bool finished: phase === "done"
   readonly property bool idle: phase === "idle" || phase === "error"
   onPhaseChanged: confirmDiscard = false
@@ -56,6 +56,8 @@ Panel {
   readonly property bool desktopOn: Omareel.get(config, "desktopAudio", false) === true
   readonly property bool webcamOn: Omareel.get(config, "webcam", false) === true
   readonly property bool denoiseOn: Omareel.get(config, "denoise", true) === true
+  readonly property bool studioOn: Omareel.get(config, "studio.enabled", false) === true
+  property string studioOfferedFile: ""
   readonly property string provider: String(Omareel.get(config, "upload.provider", "none"))
   readonly property bool uploadReady: Omareel.uploadReady(config, remoteStatus)
   readonly property bool uploadAuto: uploadReady && Omareel.get(config, "upload.auto", false) === true
@@ -71,6 +73,17 @@ Panel {
   // helper is absent from some Omarchy releases, which made every action button
   // (including Stop) fail at runtime.
   function cliRun(args) { Quickshell.execDetached([root.cli].concat(args)) }
+
+  function openStudio(file) {
+    if (root.busy || root.recording || !file) return
+    var entry = root.recordings.find(function(e) { return String(e.file) === file })
+    var saved = entry && entry.studio ? entry.studio.options : Omareel.get(root.config, "studio.style", {})
+    var original = entry && entry.studio ? String(entry.studio.original) : file
+    studioColumn.recordingWarning = root.state.file === file ? String(root.state.warning || "") : ""
+    studioColumn.begin(original, saved)
+    root.page = "studio"
+    root.open()
+  }
 
   function start(kind) {
     if (root.busy || root.recording) return
@@ -123,6 +136,7 @@ Panel {
     if (!root.runtimeReady) runtimeProc.running = true
     stateFile.reload()
     configFile.reload()
+    indexFile.reload()
     devicesProc.running = true
     remoteProc.running = true
     doctorProc.running = true
@@ -178,17 +192,25 @@ Panel {
 
   // ---- state / config plumbing -------------------------------------------
 
-  FileView {
+  onOutputDirChanged: Qt.callLater(function() { indexFile.reload() })
+
+  Process {
     id: indexFile
-    path: root.outputDir + "/index.jsonl"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      root.recordings = Omareel.parseJsonl(text(), 30)
-      if (root.selectedFile && !root.recordings.some(function(e) { return String(e.file) === root.selectedFile })) root.selectedFile = ""
+    property bool pending: false
+    function reload() {
+      if (running) pending = true
+      else running = true
     }
-    onLoadFailed: root.recordings = []
+    command: ["python3", decodeURIComponent(String(Qt.resolvedUrl("bin/recording-index.py")).replace(/^file:\/\//, "")),
+              "list", root.outputDir + "/index.jsonl"]
+    stdout: StdioCollector { id: indexOutput; waitForEnd: true }
+    stderr: StdioCollector { id: indexError; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.recordings = exitCode === 0 ? Omareel.parseJsonl(indexOutput.text, 30) : []
+      if (exitCode !== 0) root.message = String(indexError.text || "Cannot read recording library.").trim()
+      if (root.selectedFile && !root.recordings.some(function(e) { return String(e.file) === root.selectedFile })) root.selectedFile = ""
+      if (pending) { pending = false; reload() }
+    }
   }
   FileView {
     path: root.outputDir
@@ -211,7 +233,14 @@ Panel {
     stdout: StdioCollector { id: stateOutput; waitForEnd: true }
     stderr: StdioCollector { id: stateError; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode === 0) root.state = Omareel.parseJson(stateOutput.text, { phase: "idle" })
+      if (exitCode === 0) {
+        root.state = Omareel.parseJson(stateOutput.text, { phase: "idle" })
+        if (root.state.phase === "done" && root.state.studioEnabled === true
+            && root.state.file && root.studioOfferedFile !== root.state.file) {
+          root.studioOfferedFile = root.state.file
+          Qt.callLater(function() { root.openStudio(String(root.state.file)) })
+        }
+      }
       else root.state = { phase: "error", error: String(stateError.text || "Cannot read recording state.").trim() }
       if (pending) { pending = false; reload() }
     }
@@ -494,9 +523,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentWidth: panel.fittedContentWidth(Style.space(root.page === "studio" ? 560 : 380))
     contentHeight: panel.fittedContentHeight(
-      (root.page === "settings" ? settingsColumn.implicitHeight
+      (root.page === "studio" ? studioColumn.implicitHeight : root.page === "settings" ? settingsColumn.implicitHeight
        : root.page === "recordings" ? libraryColumn.implicitHeight : launcherColumn.implicitHeight), Style.space(720))
 
     PanelKeyCatcher {
@@ -514,9 +543,27 @@ Panel {
         anchors.fill: parent
         clip: true
         contentWidth: width
-        contentHeight: root.page === "settings" ? settingsColumn.implicitHeight
+        contentHeight: root.page === "studio" ? studioColumn.implicitHeight : root.page === "settings" ? settingsColumn.implicitHeight
           : root.page === "recordings" ? libraryColumn.implicitHeight : launcherColumn.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
+
+        StudioEditor {
+          id: studioColumn
+          width: parent.width
+          visible: root.page === "studio"
+          cli: root.cli
+          onStyleSaved: function(saved) {
+            // Update immediately as well as reloading the file: config writes
+            // replace it atomically, so a file watcher can miss that change.
+            var updated = JSON.parse(JSON.stringify(root.config))
+            updated.studio = updated.studio || {}
+            updated.studio.style = saved
+            root.config = updated
+            configFile.reload()
+          }
+          onEditing: function(focused) { root.editing = focused }
+          onFinished: { root.page = "launcher"; root.refreshAll(); indexFile.reload() }
+        }
 
         // ================================================================
         // Launcher page
@@ -553,7 +600,7 @@ Panel {
                 }
                 Text {
                   textFormat: Text.PlainText
-                  text: root.idle ? "Record a video and share a link" : Omareel.statusText(root.state, root.nowSec)
+                  text: root.idle ? "Record, style, and share a demo" : Omareel.statusText(root.state, root.nowSec)
                   color: Color.popups.text
                   opacity: 0.65
                   font.family: Style.font.family
@@ -596,7 +643,7 @@ Panel {
           Hint {
             visible: root.busy && !root.recording
             opacity: 1
-            text: Omareel.statusText(root.state, root.nowSec)
+            text: studioColumn.exporting ? "Exporting Studio copy… Original kept." : Omareel.statusText(root.state, root.nowSec)
           }
 
           // Readiness is guidance, not a claim that this laptop is certified.
@@ -650,8 +697,14 @@ Panel {
                 onClicked: root.renameLast()
               }
             }
-            Row {
+            Flow {
+              width: parent.width
               spacing: Style.space(8)
+              enabled: !root.busy
+              Button {
+                text: "Style"
+                onClicked: root.openStudio(String(root.state.file || ""))
+              }
               Button {
                 visible: root.canUpload
                 iconText: "󰅧"
@@ -713,6 +766,28 @@ Panel {
               tooltipText: "The whole focused monitor"
               onClicked: root.start("screen")
             }
+          }
+
+          PlainToggle {
+            visible: root.idle || root.finished
+            width: parent.width
+            label: "Studio mode"
+            description: "After Stop, choose a background and frame, then export a styled copy."
+            checked: root.studioOn
+            onClicked: root.setConfig("studio.enabled", !root.studioOn)
+          }
+          PlainToggle {
+            visible: (root.idle || root.finished) && root.studioOn
+            width: parent.width
+            label: "Zoom on clicks"
+            description: "Zoom toward your clicks in the exported video."
+            checked: Omareel.get(root.config, "studio.zoomOnClicks", false) === true
+            onClicked: root.setConfig("studio.zoomOnClicks", !checked)
+          }
+          Hint {
+            visible: (root.idle || root.finished) && root.studioOn && root.webcamOn
+              && Omareel.get(root.config, "studio.zoomOnClicks", false) === true
+            text: "Your camera stays visible while recording. Exported zooms can crop it out briefly."
           }
 
           // Sources
@@ -868,12 +943,13 @@ Panel {
             PlainToggle {
               width: parent.width
               label: "Upload every recording"
-              description: root.uploadReady
+              enabled: !root.studioOn
+              description: root.studioOn ? "Paused in Studio mode — choose Upload after reviewing your video." : root.uploadReady
                 ? (root.uploadAuto ? Omareel.uploadSummary(root.config) + " · off: decide per video after Stop"
                                    : "Off · each recording gets an Upload button after Stop")
                 : (root.provider === "none" ? "Set a destination in settings (gear)"
                                             : "Finish the destination in settings (gear)")
-              checked: root.uploadAuto
+              checked: root.uploadAuto && !root.studioOn
               onClicked: {
                 if (root.uploadReady) root.setConfig("upload.auto", !root.uploadAuto)
                 else { root.message = ""; root.page = "settings" }
@@ -1016,6 +1092,8 @@ Panel {
                 Flow {
                   width: parent.width - Style.space(8)
                   spacing: Style.space(6)
+                  enabled: !root.busy && !root.recording
+                  Button { text: "Style"; onClicked: root.openStudio(String(row.modelData.file)) }
                   Button {
                     visible: !row.shared && root.uploadReady
                     iconText: "󰅧"

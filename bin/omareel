@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# omareel — Loom-style screen recording for Omarchy.
+# omareel — screen recording and Studio finishing for Omarchy.
 #
 #   record area / window / screen with gpu-screen-recorder (GPU encode),
 #   optional webcam bubble, chosen microphone + system-audio source
@@ -24,6 +24,7 @@
 #   omareel config get | merge '<json>'  # read / deep-merge omareel.json
 #   omareel remote save|status|test      # upload credentials -> rclone.conf
 #   omareel finalize <raw.mp4> [out.mp4]
+#   omareel studio preview|export|select last|<video.mp4> ['<style-json>']
 #   omareel setup [--link]              # check deps, download verified models
 #   omareel link                        # explicitly install the CLI shortcut
 
@@ -79,6 +80,7 @@ default_config() {
   "vadRetroactiveMs": 50,
   "desktopMix": 0.5,
   "keepRaw": true,
+  "studio": { "enabled": false, "zoomOnClicks": false, "style": {} },
   "upload": {
     "auto": false,
     "provider": "none",
@@ -151,7 +153,7 @@ set_state() {
   # target/timer while processing and the URL when done.
   jq -n "${args[@]}" --argjson prev "$previous" \
     '($prev | {id, target, targetKind, region, file, startedAt, stoppedAt, url, title,
-      webcamSize, webcamShape, webcamPosition, webcamZoom}) + '"$filter" \
+      webcamSize, webcamShape, webcamPosition, webcamZoom, studioEnabled, zoomOnClicks, studioCameraSeparate}) + '"$filter" \
     | runtime write state.json || return 1
   omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
 }
@@ -565,7 +567,7 @@ resolve_recording() {
   local target="${1:-last}" file=""
   if [[ $target == last ]]; then
     file=$(state_get file)
-    [[ -n $file && -f $file ]] || file=$(tail -1 "$(recording_dir)/$INDEX_FILE_NAME" 2>/dev/null | jq -r '.file // empty')
+    [[ -n $file && -f $file ]] || file=$(python3 "$PLUGIN_DIR/bin/recording-index.py" last "$(recording_dir)/$INDEX_FILE_NAME" | jq -r '.file // empty')
   else
     file="$target"
     [[ $file == /* ]] || file="$PWD/$file"
@@ -592,7 +594,11 @@ rename_recording() {
     [[ -f ${file%.mp4}.raw.mp4 ]] && mv "${file%.mp4}.raw.mp4" "${new%.mp4}.raw.mp4"
     log "rename $(basename "$file") -> $(basename "$new")"
   fi
-  index_patch "$file" '.file = $new | .title = $title' --arg new "$new" --arg title "$title"
+  index_patch "$file" '.file = $new | .title = $title' --arg new "$new" --arg title "$title" || return 1
+  # Styled variants continue to find the source after an original is renamed.
+  python3 "$PLUGIN_DIR/bin/recording-index.py" rewrite "$file" \
+    'if .studio.original? == $old then .studio.original = $new else . end' \
+    --arg old "$file" --arg new "$new" || return 1
   if [[ -f $STATE_FILE && $(state_get file) == "$file" ]]; then
     runtime read state.json | jq --arg f "$new" --arg t "$title" '.file = $f | .title = $t' | runtime write state.json || return 1
     omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true
@@ -608,6 +614,12 @@ cmd_start() {
   denoise=$(cfg .denoise true)
   upload=none
   [[ $(cfg '.upload.auto' false) == true ]] && upload_ready && upload=rclone
+  # Snapshot at Start; Studio takes are always reviewed before sharing.
+  local studio_enabled
+  studio_enabled=$(cfg .studio.enabled false)
+  [[ $studio_enabled != true ]] || upload=none
+  local click_zoom=false
+  [[ $studio_enabled == true && $(cfg .studio.zoomOnClicks false) == true ]] && click_zoom=true
 
   local arg
   for arg in "$@"; do
@@ -648,6 +660,12 @@ cmd_start() {
   fi
 
   local output_dir
+  if [[ $click_zoom == true ]]; then
+    local click_check
+    click_check=$(python3 "$PLUGIN_DIR/bin/click-zoom.py" check 2>&1) || {
+      start_error "$click_check"; return 1;
+    }
+  fi
   output_dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
   mkdir -p "$output_dir" || { start_error "Cannot create the recording folder: $output_dir"; return 1; }
 
@@ -722,9 +740,16 @@ cmd_start() {
     ;;
   esac
 
+  if [[ $click_zoom == true && -z $region ]]; then
+    start_error "Zoom on clicks needs Area, Screen, or direct Window capture. Select direct Window in Settings or turn Zoom on clicks off."
+    return 1
+  fi
+
   # The camera starts first: it needs ~1 s to warm up, and the extra footage
   # before the recording starts is trimmed by finalize.
   local id raw cam_device webcam_size webcam_shape webcam_position_value webcam_zoom
+  # Use the same live self-view in Studio and normal recording. Direct KMS
+  # includes that bubble in the screen; click zoom applies to the whole image.
   id=$(new_id)
   raw="$output_dir/$id.raw.mp4"
   webcam_size=$(cfg .webcamSize medium)
@@ -796,9 +821,11 @@ cmd_start() {
 
   # Wall-clock moment the recorder started writing: finalize lines the camera
   # take up against it.
+  local capture_started
+  capture_started=$(date +%s.%N)
   if [[ -f $CAM_PID_FILE ]]; then
     if webcam_capture_alive; then
-      date +%s.%N >"${raw%.raw.mp4}.cam.start"
+      printf '%s\n' "$capture_started" >"${raw%.raw.mp4}.cam.start"
     else
       webcam_failed "${cam_device:-camera}" "capture exited before the recording started"
       stop_webcam_capture
@@ -806,10 +833,25 @@ cmd_start() {
     fi
   fi
 
+  if [[ $click_zoom == true ]]; then
+    python3 "$PLUGIN_DIR/bin/click-zoom.py" watch "$raw" "$pid" "$region" "$capture_started" > >(runtime append omareel.log >/dev/null 2>&1) 2>&1 &
+    local click_pid=$! click_wait=0
+    while [[ ! -f $RUNTIME_DIR/$id.click-session.ready ]] && kill -0 "$click_pid" 2>/dev/null && ((click_wait < 30)); do
+      sleep .1; ((click_wait++))
+    done
+    if [[ ! -f $RUNTIME_DIR/$id.click-session.ready ]]; then
+      kill -TERM "$click_pid" "$pid" 2>/dev/null || true
+      cleanup_webcam
+      start_error "Click tracking could not start. Turn Zoom on clicks off to record normally. Details: $LOG_FILE"
+      return 1
+    fi
+  fi
+
   set_state recording id="$id" target="$label" targetKind="$kind" file="$raw" region="$region" \
     startedAt="$(date +%s)" denoise="$denoise" upload="$upload" mic="$mic" desktop="$desktop" \
     webcamSize="$webcam_size" webcamShape="$webcam_shape" \
-    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom"
+    webcamPosition="$webcam_position_value" webcamZoom="$webcam_zoom" studioEnabled="$studio_enabled" \
+    zoomOnClicks="$click_zoom" studioCameraSeparate=false
 }
 
 compatibility_report() { python3 "$PLUGIN_DIR/bin/system-check.py" check <(config_read) "$@"; }
@@ -834,6 +876,7 @@ cmd_stop() {
   local pid raw denoise upload mic desktop webcam_size webcam_shape webcam_position_value webcam_zoom
   pid=$(runtime read gsr.pid 2>/dev/null || true)
   raw=$(state_get file)
+  [[ $(state_get zoomOnClicks) != true ]] || python3 "$PLUGIN_DIR/bin/click-zoom.py" stop "$raw"
   denoise=$(state_get denoise)
   upload=$(state_get upload)
   if [[ $SETTINGS_RECOVERY == true ]]; then denoise=false; upload=none; fi
@@ -893,7 +936,23 @@ cmd_stop() {
       return 1
     }
     processing_warning="Cleanup failed; saved the unprocessed recording. The raw take is retained."
-  elif [[ $SETTINGS_RECOVERY != true && $(cfg .keepRaw true) != true ]]; then
+  fi
+  local capture='{}'
+  if [[ $(state_get studioCameraSeparate) == true ]]; then
+    local camera_settings
+    camera_settings=$(jq -nc --arg size "$webcam_size" --arg shape "$webcam_shape" \
+      --arg position "$webcam_position_value" --arg zoom "$webcam_zoom" '{size:$size,shape:$shape,position:$position,zoom:$zoom}')
+    capture=$(python3 "$PLUGIN_DIR/bin/studio.py" prepare-camera "$raw" "$final" "$camera_settings" 2> >(runtime append omareel.log >/dev/null 2>&1)) || {
+      set_state error file="$final" error="Could not combine the camera. Screen and camera originals are retained; see $LOG_FILE"
+      return 1
+    }
+  fi
+  if [[ $(state_get zoomOnClicks) == true ]]; then
+    local clicks
+    clicks=$(python3 "$PLUGIN_DIR/bin/click-zoom.py" collect "$raw")
+    capture=$(jq -c --argjson clicks "$clicks" '. + {zoomOnClicks:true,clicks:$clicks}' <<<"$capture")
+  fi
+  if [[ $SETTINGS_RECOVERY != true && -z $processing_warning && $(cfg .keepRaw true) != true ]]; then
     rm -f "$raw" "${raw%.raw.mp4}.cam.mp4"
   fi
   rm -f "${raw%.raw.mp4}.cam.start"
@@ -910,12 +969,15 @@ cmd_stop() {
   share="${url:-$final}"
   printf '%s' "$share" | wl-copy 2>/dev/null || true
   append_index "$final" "$url"
+  [[ $capture == '{}' ]] || index_patch "$final" '.capture = $capture' --argjson capture "$capture"
 
   local can_upload=false
   [[ $SETTINGS_RECOVERY != true && -z $url ]] && upload_ready && can_upload=true
   set_state done file="$final" url="$url" progress=100 canUpload="$can_upload" warning="$processing_warning"
   if [[ -n $url ]]; then
     notify -u normal -t 10000 --image "$thumb" "Omareel link copied" "$url" --exec xdg-open "$url"
+  elif [[ $(state_get studioEnabled) == true ]]; then
+    notify -u normal -t 10000 --image "$thumb" "Omareel Studio ready" "Original saved · choose a look, then export or use the original" --exec omarchy-shell omareel show
   elif [[ ${upload:-none} != none ]]; then
     notify -u critical -t 10000 --image "$thumb" "Omareel saved, upload failed" "$final" --exec mpv -- "$final"
   elif [[ $can_upload == true ]]; then
@@ -939,6 +1001,7 @@ cmd_cancel() {
     local pid raw
     pid=$(runtime read gsr.pid)
     raw=$(state_get file)
+    [[ $(state_get zoomOnClicks) != true ]] || python3 "$PLUGIN_DIR/bin/click-zoom.py" stop "$raw"
     kill -INT "$pid" 2>/dev/null
     sleep 0.5
     kill -9 "$pid" 2>/dev/null
@@ -1085,6 +1148,13 @@ afftdn_expander() {
   esac
 }
 
+# Keep the natural voice component through quiet syllables and word endings.
+# The guide is measured before loudness normalization, when a quiet microphone
+# can be well below speech playback level. Still attenuate it fully in pauses.
+voice_detail_gate() {
+  echo "sidechaingate=threshold=0.004:ratio=2:range=0.05:attack=5:release=400:knee=4"
+}
+
 # voice_graph <input-label> <engine> <output-label>
 # Produces a complete labeled filtergraph fragment for the microphone track.
 voice_graph() {
@@ -1110,7 +1180,7 @@ voice_graph() {
       # the cleaned voice as a guide so it does not restore room hiss in gaps.
       # Pad the dry side too: sidechaingate otherwise sees its EOF while the
       # wet branch is still flushing and can drop the last look-ahead interval.
-      echo "[$input]$base,asetnsamples=n=480:p=0,asplit=2[${output}_dry][${output}_in];[${output}_in]$denoiser,asplit=2[${output}_wet][${output}_guide];[${output}_dry]apad=pad_len=$delay[${output}_drypad];[${output}_drypad][${output}_guide]sidechaingate=threshold=0.008:ratio=2:range=0.05:attack=5:release=250:knee=4[${output}_natural];[${output}_wet][${output}_natural]amix=inputs=2:weights='$wet $dry':duration=first:normalize=0,$tone,$compressor[$output]"
+      echo "[$input]$base,asetnsamples=n=480:p=0,asplit=2[${output}_dry][${output}_in];[${output}_in]$denoiser,asplit=2[${output}_wet][${output}_guide];[${output}_dry]apad=pad_len=$delay[${output}_drypad];[${output}_drypad][${output}_guide]$(voice_detail_gate)[${output}_natural];[${output}_wet][${output}_natural]amix=inputs=2:weights='$wet $dry':duration=first:normalize=0,$tone,$compressor[$output]"
     fi
     ;;
   arnndn)
@@ -1476,21 +1546,12 @@ video_duration() {
 
 # index_patch <file> '<jq filter for the matching entry>' [--arg …]
 index_patch() {
-  local file="$1" filter="$2" dir tmp
-  shift 2
-  dir=$(dirname "$file")
-  [[ -f $dir/$INDEX_FILE_NAME ]] || return 0
-  tmp="$dir/$INDEX_FILE_NAME.tmp"
-  jq -c --arg file "$file" "$@" "if .file == \$file then ($filter) else . end" \
-    "$dir/$INDEX_FILE_NAME" >"$tmp" && mv "$tmp" "$dir/$INDEX_FILE_NAME"
+  python3 "$PLUGIN_DIR/bin/recording-index.py" patch "$@"
 }
 
 # index_entry <file> -> the entry JSON, or empty
 index_entry() {
-  local file="$1" dir
-  dir=$(dirname "$file")
-  [[ -f $dir/$INDEX_FILE_NAME ]] || return 0
-  jq -c --arg file "$file" 'select(.file == $file)' "$dir/$INDEX_FILE_NAME" 2>/dev/null | tail -1
+  python3 "$PLUGIN_DIR/bin/recording-index.py" entry "$1"
 }
 
 # append_index <file> <url> [id] [title]
@@ -1500,11 +1561,81 @@ append_index() {
   [[ -n $id ]] || id=$(basename "${file%.mp4}")
   jq -nc --arg id "$id" --arg file "$file" --arg url "$url" --arg title "$title" \
     --argjson dur "$(video_duration "$file")" --arg target "$(state_get target)" \
-    '{id: $id, file: $file, title: $title, url: $url, duration: $dur, target: $target, at: (now | floor)}' \
-    >>"$dir/$INDEX_FILE_NAME"
+    '{id: $id, file: $file, title: $title, url: $url, duration: $dur, target: $target, at: (now | floor)}' | \
+    python3 "$PLUGIN_DIR/bin/recording-index.py" append "$file"
 }
 
 # ---------------------------------------------------------------- upload ---
+
+# Studio never changes capture/audio processing or uploads automatically.
+# A new export gets its own index identity, so sharing cannot overwrite the
+# original cloud object. Failed renders leave both saved state and input alone.
+cmd_studio() (
+  local action="${1:-defaults}" file result exported entry title can_upload=false url style="${3:-}" original_warning=""
+  local saved_state="" result_file="" render_pid=""
+  [[ -n $style ]] || style='{}'
+  [[ $action != defaults ]] || { python3 "$PLUGIN_DIR/bin/studio.py" defaults; return; }
+  case "$action" in preview | export | select) ;; *) echo "studio: expected preview, export or select" >&2; return 2;; esac
+  file=$(resolve_recording "${2:-last}") || return 1
+  [[ $(state_get file) != "$file" ]] || original_warning=$(state_get warning)
+  if [[ $action != select ]]; then
+    local original
+    original=$(index_entry "$file" | jq -r '.studio.original // empty')
+    if [[ -n $original ]]; then
+      file=$(resolve_recording "$original") || {
+        echo "Studio original is missing. Restore it to restyle this export; the existing export is safe." >&2
+        return 1
+      }
+    fi
+  fi
+  if [[ $action == preview ]]; then
+    python3 "$PLUGIN_DIR/bin/studio.py" preview "$file" "$style"
+    return
+  fi
+  if [[ $action == export ]]; then
+    saved_state=$(mktemp "$RUNTIME_DIR/studio-state.XXXXXX") || return 1
+    if [[ -f $STATE_FILE ]]; then
+      runtime read state.json >"$saved_state" || { rm -f -- "$saved_state"; return 1; }
+    else
+      printf '{"phase":"idle"}' >"$saved_state"
+    fi
+    trap '
+      if [[ -n $render_pid ]]; then kill -TERM "$render_pid" 2>/dev/null || true; wait "$render_pid" 2>/dev/null || true; fi
+      if [[ -n $saved_state ]]; then runtime write state.json <"$saved_state"; rm -f -- "$saved_state"; omarchy-shell -q omarchy.indicators refresh 2>/dev/null || true; fi
+      [[ -z $result_file ]] || rm -f -- "$result_file"
+    ' EXIT
+    trap 'exit 130' INT TERM
+    result_file=$(mktemp "$RUNTIME_DIR/studio-result.XXXXXX") || return 1
+    set_state processing file="$file" progress=0 studioExport=true || return 1
+    python3 "$PLUGIN_DIR/bin/studio.py" export "$file" "$style" >"$result_file" &
+    render_pid=$!
+    local code=0
+    wait "$render_pid" || code=$?
+    render_pid=""
+    ((code == 0)) || return "$code"
+    result=$(cat "$result_file")
+    exported=$(jq -er .file <<<"$result") || return 1
+    title=$(index_entry "$file" | jq -r '.title // empty')
+    [[ -n $title ]] || title=$(basename "${file%.mp4}")
+    append_index "$exported" "" "$(basename "${exported%.mp4}")" "$title — Studio" || {
+      echo "Export saved at $exported, but the library could not be updated." >&2; return 1;
+    }
+    # Index metadata follows renames; no fragile filename-based sidecars.
+    index_patch "$exported" '.studio = $studio' --argjson studio "$(jq '{original, options}' <<<"$result")" || return 1
+    file="$exported"
+    make_thumbnail "$file" "${file%.mp4}.jpg"
+  fi
+  entry=$(index_entry "$file")
+  [[ -n $entry ]] || entry='{}'
+  url=$(jq -r '.url // empty' <<<"$entry")
+  title=$(jq -r '.title // empty' <<<"$entry")
+  [[ -n $url ]] || { upload_ready && can_upload=true; }
+  set_state done file="$file" url="$url" title="$title" canUpload="$can_upload" progress=100 \
+    warning="$original_warning" studioEnabled=false || return 1
+  if [[ -n $saved_state ]]; then rm -f -- "$saved_state"; saved_state=""; fi
+  printf '%s' "${url:-$file}" | wl-copy 2>/dev/null || true
+  jq -nc --arg file "$file" '{file:$file}'
+)
 
 html_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' <<<"$1"; }
 
@@ -1892,7 +2023,7 @@ cmd_last() {
   local dir
   dir=$(expand_home "$(cfg .outputDir "~/Videos/Omareel")")
   local last
-  last=$(tail -1 "$dir/$INDEX_FILE_NAME" 2>/dev/null) || {
+  last=$(python3 "$PLUGIN_DIR/bin/recording-index.py" last "$dir/$INDEX_FILE_NAME") || {
     echo "no recordings yet" >&2
     return 1
   }
@@ -1960,7 +2091,7 @@ remote)
     exec python3 "$PLUGIN_DIR/bin/runtime.py" locked "$SELF" "$@"
   fi
   ;;
-start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link)
+start | stop | cancel | toggle | upload | rename | page | dismiss | finalize | setup | link | studio)
   if [[ ${OMAREEL_OPERATION_LOCKED:-0} != 1 ]]; then
     exec python3 "$PLUGIN_DIR/bin/runtime.py" locked "$SELF" "$@"
   fi
@@ -1979,7 +2110,7 @@ toggle)
 esac
 
 case "${1:-}" in
-upload | rename | page | finalize | setup | link)
+upload | rename | page | finalize | setup | link | studio)
   case "$(current_phase)" in
   picking | starting | recording | processing | uploading)
     echo "Finish the current recording before changing or sharing a saved take." >&2
@@ -2023,6 +2154,7 @@ finalize)
   [[ -n ${2:-} ]] || { usage; exit 2; }
   finalize_video "$2" "${3:-${2%.raw.mp4}.mp4}" "$(cfg .denoise true)"
   ;;
+studio) shift; cmd_studio "$@" ;;
 upload) shift; cmd_upload "$@" ;;
 page) shift; cmd_page "$@" ;;
 rename) shift; cmd_rename "$@" ;;

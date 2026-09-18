@@ -23,7 +23,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omareel-runtime-native-") as directory:
         for filename in ("BarWidget.qml", "Panel.qml"):
             source = (ROOT / filename).read_text()
-            for mode in ("normal", "symlink-start", "large-start", "large-later", "symlink-later"):
+            modes = ["normal", "symlink-start", "large-start", "large-later", "symlink-later"]
+            if "studioOfferedFile" in source:
+                modes.append("studio-done")
+            for mode in modes:
                 unsafe = mode.endswith("-start")
                 late = mode.endswith("-later")
                 work = Path(directory) / (filename + "-" + mode)
@@ -46,6 +49,8 @@ def main():
                 watcher = enclosing(source, 'path: root.runtimeReady ? root.runtimeDir : ""', "FileView")
                 command = ["bash", "-c", 'source "$1"; omarchy-shell(){ :; }; set_state done id=native-test',
                            "_", str(ROOT / "bin/omareel")]
+                if mode == "studio-done":
+                    command[2] += " file=fixture.mp4 studioEnabled=true"
                 if late:
                     operation = ("p.unlink(); p.symlink_to(sys.argv[2])" if mode == "symlink-later"
                                  else "f=p.open('wb'); f.truncate(8*1024**3); f.close()")
@@ -65,6 +70,9 @@ ShellRoot {
     property string message: ""
     property bool readPlanted: false
     property bool startedWrite: false
+    property string studioOfferedFile: ""
+    property string openedStudioFile: ""
+    function openStudio(file) { openedStudioFile = file }
     onStateChanged: { if (state.id === "planted") readPlanted = true }
     QtObject { id: configFile; function reload() {} }
     __STATE__
@@ -87,7 +95,7 @@ ShellRoot {
           if (root.readPlanted || !root.runtimeReady) console.error("UNSAFE RUNTIME READ")
           else console.log("RUNTIME NATIVE PASS")
           Qt.quit()
-        } else if (root.state.id === "native-test") {
+        } else if (root.state.id === "native-test" && (!__STUDIO__ || root.openedStudioFile === "fixture.mp4")) {
           console.log("RUNTIME NATIVE PASS")
           Qt.quit()
         }
@@ -99,7 +107,7 @@ ShellRoot {
 '''.replace("__CLI__", json.dumps(str(ROOT / "bin/omareel")))
                     .replace("__RUNTIME__", json.dumps(str(runtime))).replace("__STATE__", state)
                     .replace("__WATCHER__", watcher).replace("__STARTUP__", startup)
-                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()).replace("__LATE__", str(late).lower()))
+                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()).replace("__LATE__", str(late).lower()).replace("__STUDIO__", str(mode == "studio-done").lower()))
                 env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
                            QT_QUICK_CONTROLS_STYLE="Basic", QT_QPA_PLATFORMTHEME="", XDG_RUNTIME_DIR=str(work),
                            XDG_CACHE_HOME=str(work / "cache"), OMAREEL_CONFIG=str(work / "config.json"))

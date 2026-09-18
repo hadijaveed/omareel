@@ -40,7 +40,7 @@ function statusText(state, nowSec) {
   case "starting": return "Starting camera and screen capture…"
   case "error": return String(state.error || "Recording could not start. Check Setup in Settings.")
   case "recording": return formatElapsed(state, nowSec) + (state.target ? "  ·  " + state.target : "")
-  case "processing": return "Preparing your video…"
+  case "processing": return state.studioExport === true ? "Exporting Studio copy… Original kept." : "Preparing your video…"
   case "uploading": return "Uploading" + (state.progress ? "  " + state.progress + "%" : "…")
   case "done":
     if (state.url) return "Link copied to clipboard"

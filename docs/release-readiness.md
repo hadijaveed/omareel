@@ -2,7 +2,13 @@
 
 ## Scope
 
-0.9.2 is an Omarchy 4 beta, not a promise of universal laptop compatibility.
+0.9.3 Studio is in development on `feat/studio-mode`. The 0.9.2 marketplace
+update was approved and published on September 16, 2026 ([confirmation](https://github.com/omacom/omarchy-plugin-marketplace/issues/5763#issuecomment-5694530303)).
+The remaining release requirements are testing on multiple physical laptops
+and Hadi's approval of picture, camera, zoom and voice quality.
+See the [candidate test plan](0.9.3-testing.md) and [positioning brief](positioning.md).
+
+0.9.2 remains the public Omarchy 4 beta, not a promise of universal laptop compatibility.
 Default fixed-region/window privacy behavior is intentionally unchanged.
 Fresh-machine fixtures are automated; actual GPU, camera, permissions,
 suspend/resume, monitor docking, and a real cloud account still need testing
@@ -48,7 +54,9 @@ on each supported hardware family before broad certification.
 ## Automated release checks
 
 Run shell syntax, `node tests/helpers.js`, and the Python regression
-suites: setup, workflow, audio, upload, runtime-security, and text-security. Upload integration uses a local HTTPS
+suites: setup, workflow, audio, upload, runtime-security, text-security and studio-regression.
+Studio is an opt-in development-branch feature; see [its guide](studio-mode.md).
+Upload integration uses a local HTTPS
 S3-compatible fixture, never a customer's account. QML parser and Omarchy
 manifest validation complement these tests but do not prove live UI behavior.
 The CI audio dependency is built from pinned upstream RNNoise v1.21.
