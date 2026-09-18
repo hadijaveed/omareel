@@ -526,6 +526,14 @@ Logs stream in 64 KiB chunks and restart at the cap, retaining new output withou
 interrupting recording. Both UI state readers enforce these limits on every update.
 These limits apply to helper data, not recorded videos.
 
+The Studio preview also bounds recording-library metadata: 8 MiB per index,
+1 MiB per entry, and 64 bytes for camera timestamps. Library reads and updates
+use checked files, locks, and atomic replacement; the library UI reads through
+the bounded helper. Studio subprocess output has a 1 MiB stdout limit and
+256 KiB stderr limit (8 MiB stdout for library rewrites). Exceeding a limit
+reports an error and preserves the existing library or recording. An oversized
+index needs reducing or archiving before further library updates.
+
 ### Regression checks
 
 Run `python3 tests/runtime-limits.py` for oversized files/pipes under a memory

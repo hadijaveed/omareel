@@ -136,6 +136,7 @@ Panel {
     if (!root.runtimeReady) runtimeProc.running = true
     stateFile.reload()
     configFile.reload()
+    indexFile.reload()
     devicesProc.running = true
     remoteProc.running = true
     doctorProc.running = true
@@ -191,17 +192,25 @@ Panel {
 
   // ---- state / config plumbing -------------------------------------------
 
-  FileView {
+  onOutputDirChanged: Qt.callLater(function() { indexFile.reload() })
+
+  Process {
     id: indexFile
-    path: root.outputDir + "/index.jsonl"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      root.recordings = Omareel.parseJsonl(text(), 30)
-      if (root.selectedFile && !root.recordings.some(function(e) { return String(e.file) === root.selectedFile })) root.selectedFile = ""
+    property bool pending: false
+    function reload() {
+      if (running) pending = true
+      else running = true
     }
-    onLoadFailed: root.recordings = []
+    command: ["python3", decodeURIComponent(String(Qt.resolvedUrl("bin/recording-index.py")).replace(/^file:\/\//, "")),
+              "list", root.outputDir + "/index.jsonl"]
+    stdout: StdioCollector { id: indexOutput; waitForEnd: true }
+    stderr: StdioCollector { id: indexError; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.recordings = exitCode === 0 ? Omareel.parseJsonl(indexOutput.text, 30) : []
+      if (exitCode !== 0) root.message = String(indexError.text || "Cannot read recording library.").trim()
+      if (root.selectedFile && !root.recordings.some(function(e) { return String(e.file) === root.selectedFile })) root.selectedFile = ""
+      if (pending) { pending = false; reload() }
+    }
   }
   FileView {
     path: root.outputDir

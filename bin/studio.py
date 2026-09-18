@@ -10,11 +10,14 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zlib
 
@@ -82,17 +85,56 @@ def zoom_expressions(events):
     return "+".join(z), f"(iw-iw/zoom)*({'+'.join(x)})", f"(ih-ih/zoom)*({'+'.join(y)})"
 
 
+def metadata_file(path, limit):
+    """Open helper metadata without following links or blocking on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022 or info.st_nlink != 1):
+            raise ValueError("Unsafe Studio metadata file")
+        if info.st_size > limit:
+            raise ValueError("Studio metadata exceeds its byte limit")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def recording_capture(source):
-    index = source.parent / "index.jsonl"
-    if index.exists():
-        for line in reversed(index.read_text().splitlines()):
+    # Bound both the total scan and each record, including files growing while
+    # being read. Keep only the newest matching capture, not the entire library.
+    budget, line_limit = 8 * 1024 * 1024, 1024 * 1024
+    capture = {}
+    try:
+        stream = metadata_file(source.parent / "index.jsonl", budget)
+    except FileNotFoundError:
+        return capture
+    with stream:
+        while True:
+            line = stream.readline(min(line_limit, budget) + 1)
+            if not line:
+                break
+            if len(line) > line_limit or len(line) > budget:
+                raise ValueError("Studio recording index exceeds its byte limit")
+            budget -= len(line)
             try:
                 entry = json.loads(line)
-                if entry.get("file") == str(source):
-                    return entry.get("capture", {})
             except ValueError:
                 continue
-    return {}
+            if isinstance(entry, dict) and entry.get("file") == str(source):
+                capture = entry.get("capture", {})
+    if not isinstance(capture, dict):
+        raise ValueError("Invalid Studio capture metadata")
+    clicks = capture.get("clicks", [])
+    if not isinstance(clicks, list) or len(clicks) > 16384:
+        raise ValueError("Invalid Studio click metadata")
+    for click in clicks:
+        if (not isinstance(click, dict) or not all(
+                type(click.get(k)) in (int, float) and math.isfinite(click[k])
+                for k in ("time", "x", "y"))):
+            raise ValueError("Invalid Studio click metadata")
+    return capture
 
 
 def click_zooms(clicks, duration):
@@ -148,9 +190,17 @@ def prepare_camera(raw, final, settings):
     """
     prefix = str(raw).removesuffix(".raw.mp4")
     cam = local_file(prefix + ".cam.mp4")
-    start = float(Path(prefix + ".cam.start").read_text())
-    cam_start = float(run(["ffprobe","-v","error","-show_entries","format=start_time",
+    with metadata_file(prefix + ".cam.start", 64) as stream:
+        timestamp = stream.read(65)
+    if len(timestamp) > 64:
+        raise ValueError("Studio camera timestamp exceeds its byte limit")
+    start = float(timestamp)
+    if not math.isfinite(start):
+        raise ValueError("Invalid Studio camera timestamp")
+    cam_start = float(run(["ffprobe","-v","error","-protocol_whitelist","file,pipe","-f","mov","-show_entries","format=start_time",
                            "-of","csv=p=0",str(cam)]).decode().strip())
+    if not math.isfinite(cam_start):
+        raise ValueError("Invalid Studio camera start time")
     camera = settings | dict(file=str(cam),delta=cam_start-start-.1)
     info = probe(final)
     screen_copy,cam_copy = Path(prefix+".studio-screen.mp4"),Path(prefix+".studio-camera.mp4")
@@ -159,8 +209,10 @@ def prepare_camera(raw, final, settings):
         graph,_,mask,x,y=camera_filter(camera,info["width"],info["height"],directory,1,2)
         graph+=f"[0:v][cam]overlay={x}:{y}:eof_action=repeat,format=yuv420p[out]"
         output=directory/"original.mp4"
-        run(["ffmpeg","-v","error","-nostdin","-filter_complex_threads","2","-i",str(final),
-             "-i",str(cam),"-i",str(mask),"-filter_complex",graph,"-map","[out]","-map","0:a?",
+        run(["ffmpeg","-v","error","-nostdin","-filter_complex_threads","2",
+             "-protocol_whitelist","file,pipe","-f","mov","-i",str(final),
+             "-protocol_whitelist","file,pipe","-f","mov","-i",str(cam),
+             "-i",str(mask),"-filter_complex",graph,"-map","[out]","-map","0:a?",
              "-c:a","copy","-c:v","libx264","-crf","18","-preset","veryfast","-threads","2",
              "-t",str(info["duration"]),"-movflags","+faststart",str(output)])
         os.link(final,screen_copy)
@@ -182,22 +234,43 @@ def local_file(value):
     return path
 
 
-def run(args, timeout=None):
-    # Children are reaped on cancellation, including FFmpeg's encoder workers.
-    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+def run(args, timeout=None, input_file=None, stdout_limit=1024 * 1024):
+    # Drain both pipes concurrently with fixed ceilings before accumulating.
+    # Excess output fails the operation and reaps the child; it cannot exhaust
+    # memory first and only then be truncated for an error message.
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with subprocess.Popen(args, stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
         try:
-            stdout, stderr = child.communicate(timeout=timeout)
+            buffers = [bytearray(), bytearray()]
+            limits = [stdout_limit, 256 * 1024]
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ, 0)
+                selector.register(child.stderr, selectors.EVENT_READ, 1)
+                while selector.get_map():
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    for key, _ in selector.select(.1):
+                        i = key.data
+                        chunk = os.read(key.fd, min(65536, limits[i] - len(buffers[i]) + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if len(buffers[i]) + len(chunk) > limits[i]:
+                            raise ValueError("Studio subprocess output exceeds its byte limit")
+                        buffers[i].extend(chunk)
+            child.wait(timeout=None if deadline is None else max(0, deadline-time.monotonic()))
+            stdout, stderr = buffers
         except BaseException:
             child.terminate()
             try:
-                child.communicate(timeout=3)
+                child.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 child.kill()
-                child.communicate()
+                child.wait()
             raise
     if child.returncode:
         raise ValueError(stderr.decode(errors="replace")[-1800:].strip() or "Studio render failed")
-    return stdout
+    return bytes(stdout)
 
 
 def probe(path):
@@ -388,7 +461,7 @@ def render(source, opts, directory, preview=False):
     if camera:
         camgraph,camfile,cammask,camx,camy = camera_filter(camera,vw,vh,directory,4,5,opts["previewTime"] if preview else 0)
         graph += camgraph + f"[framed][cam]overlay={x+camx}:{y+camy}:eof_action=repeat,format=yuv420p"
-        cam_inputs = ["-i",str(camfile),"-i",str(cammask)]
+        cam_inputs = ["-protocol_whitelist","file,pipe","-f","mov","-i",str(camfile),"-i",str(cammask)]
     else:
         graph += "[framed]format=yuv420p"
     if preview:
@@ -439,8 +512,8 @@ def main():
         print(json.dumps(prepare_camera(source,local_file(args.settings),json.loads(args.camera_settings))))
         return
     opts = options(json.loads(args.settings))
-    runtime = Path(subprocess.check_output(
-        [sys.executable, str(Path(__file__).with_name("runtime.py")), "init"], text=True).strip())
+    runtime = Path(run(
+        [sys.executable, str(Path(__file__).with_name("runtime.py")), "init"], 15).decode().strip())
     # Exports stage on the destination filesystem. A completed file appears
     # atomically under a new UUID, never replacing the input or another export.
     parent = runtime if args.action == "preview" else source.parent

@@ -20,6 +20,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime import Runtime
+from studio import run
 
 DESCRIPTION = "Omareel recording click zoom"
 
@@ -29,14 +30,14 @@ def process_start(pid):
 
 
 def hypr(code):
-    result = subprocess.run(["hyprctl", "repl", code], capture_output=True, text=True, timeout=3)
-    if result.returncode or "OMAREEL_OK" not in result.stdout:
+    result = run(["hyprctl", "repl", code], 3).decode(errors="replace")
+    if "OMAREEL_OK" not in result:
         raise ValueError("Zoom on clicks needs Hyprland's Lua API. Turn the toggle off to record normally.")
 
 
 def check():
     hypr('assert(type(hl.bind)=="function" and type(hl.get_cursor_pos)=="function"); return "OMAREEL_OK"')
-    binds = json.loads(subprocess.check_output(["hyprctl", "binds", "-j"], timeout=3))
+    binds = json.loads(run(["hyprctl", "binds", "-j"], 3))
     if any(b.get("key") == "mouse:272" and b.get("modmask") == 0
            and b.get("description") != DESCRIPTION for b in binds):
         raise ValueError("Another desktop binding uses plain left-click. Turn Zoom on clicks off to preserve that binding.")

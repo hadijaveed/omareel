@@ -3,12 +3,14 @@
 import hashlib
 import importlib.util
 import itertools
+import io
 import json
 import os
 from pathlib import Path
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -399,6 +401,137 @@ class StudioRegression(unittest.TestCase):
         finally:
             if child.poll() is None: child.kill(); child.communicate()
         self.assertEqual(hashlib.sha256(self.video.read_bytes()).digest(),self.digest)
+
+
+class StudioInputLimits(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="omareel-studio-limits-")
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name)
+        self.source = self.path / "take.mp4"
+        self.index = self.path / "index.jsonl"
+
+    def index_cli(self, action, *args, entry=None):
+        return subprocess.run([sys.executable,str(ROOT/"bin/recording-index.py"),action,
+                               str(self.source),*args],input=entry,capture_output=True,text=True,timeout=5)
+
+    def test_library_patch_ignores_planted_legacy_temp_and_preserves_failed_write(self):
+        self.index.write_text(json.dumps(dict(file=str(self.source),title="original"))+"\n")
+        victim=self.path/"victim"
+        victim.write_text("untouched")
+        (self.path/"index.jsonl.tmp").symlink_to(victim)
+        result=self.index_cli("patch", ".title=$title", "--arg", "title", "updated")
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(victim.read_text(),"untouched")
+        self.assertEqual(json.loads(self.index.read_text())["title"],"updated")
+        before=self.index.read_bytes()
+        self.assertNotEqual(self.index_cli("patch", 'error("failure")').returncode,0)
+        self.assertEqual(self.index.read_bytes(),before)
+        self.assertEqual(list(self.path.glob(".write-*")),[])
+
+    def test_library_rejects_planted_index_and_lock(self):
+        victim=self.path/"victim"
+        victim.write_text("untouched")
+        for name in ("index.jsonl","index.lock"):
+            path=self.path/name
+            path.unlink(missing_ok=True)
+            path.symlink_to(victim)
+            result=self.index_cli("append",entry=json.dumps(dict(file=str(self.source))))
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual(victim.read_text(),"untouched")
+            path.unlink()
+
+    def test_library_concurrent_appends_preserve_all_entries(self):
+        children=[]
+        for i in range(4):
+            child=subprocess.Popen([sys.executable,str(ROOT/"bin/recording-index.py"),"append",str(self.source)],
+                                   stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            child.stdin.write(json.dumps(dict(file=str(self.source),title=str(i))).encode())
+            child.stdin.close()
+            child.stdin=None
+            children.append(child)
+        for child in children:
+            _,error=child.communicate(timeout=5)
+            self.assertEqual(child.returncode,0,error)
+        self.assertEqual({json.loads(line)["title"] for line in self.index.read_text().splitlines()},
+                         {"0","1","2","3"})
+        self.assertEqual(self.index.stat().st_mode & 0o777,0o600)
+
+    def test_library_oversized_index_and_entry_preserve_file(self):
+        with self.index.open("wb") as stream: stream.truncate(8*1024**3)
+        self.assertNotEqual(self.index_cli("entry").returncode,0)
+        self.assertNotEqual(self.index_cli("append",entry='{}').returncode,0)
+        self.assertEqual(self.index.stat().st_size,8*1024**3)
+        self.index.write_text('{}\n')
+        self.assertNotEqual(self.index_cli("append",entry='x'*(1024**2+1)).returncode,0)
+        self.assertEqual(self.index.read_text(),'{}\n')
+
+    def test_index_keeps_latest_match_and_ignores_unrelated_malformed_records(self):
+        entries = ["bad json", "[]", json.dumps(dict(file=str(self.source), capture={"clicks":[]})),
+                   json.dumps(dict(file=str(self.source), capture={"zoomOnClicks":True})),
+                   json.dumps(dict(file="another.mp4",capture=None))]
+        self.index.write_text("\n".join(entries))
+        self.assertEqual(studio.recording_capture(self.source), {"zoomOnClicks":True})
+
+    def test_sparse_index_rejected_under_memory_ceiling(self):
+        with self.index.open("wb") as stream:
+            stream.truncate(8 * 1024**3)
+        code = ('import importlib.util,resource,sys; from pathlib import Path; '
+                'resource.setrlimit(resource.RLIMIT_AS,(96*1024**2,96*1024**2)); '
+                's=importlib.util.spec_from_file_location("studio",sys.argv[1]); '
+                'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                'm.recording_capture(Path(sys.argv[2]))')
+        result = subprocess.run([sys.executable,"-c",code,str(ROOT/"bin/studio.py"),str(self.source)],
+                                capture_output=True,text=True,timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("metadata exceeds its byte limit", result.stderr)
+        self.assertNotIn("MemoryError", result.stderr)
+
+    def test_index_line_limit_applies_even_after_open_size_check(self):
+        with patch.object(studio, "metadata_file", return_value=io.BytesIO(b"x"*(1024**2+1))):
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                studio.recording_capture(self.source)
+
+    def test_metadata_rejects_links_fifo_and_oversized_timestamp(self):
+        real = self.path / "real"
+        real.write_bytes(b"0"*65)
+        with self.assertRaisesRegex(ValueError,"byte limit"):
+            studio.metadata_file(real,64)
+        self.index.symlink_to(real)
+        with self.assertRaises(OSError):
+            studio.recording_capture(self.source)
+        self.index.unlink()
+        os.mkfifo(self.index)
+        with self.assertRaisesRegex(ValueError,"Unsafe"):
+            studio.recording_capture(self.source)
+        self.index.unlink()
+        os.link(real,self.index)
+        with self.assertRaisesRegex(ValueError,"Unsafe"):
+            studio.recording_capture(self.source)
+
+    def test_invalid_capture_and_clicks_fail_cleanly(self):
+        for capture in (None, [], {"clicks": [None]}, {"clicks":[{}]},
+                        {"clicks":[dict(time=float("nan"),x=0,y=0)]},
+                        {"clicks": [dict(time=0,x=0,y=0)]*16385}):
+            self.index.write_text(json.dumps(dict(file=str(self.source),capture=capture)))
+            with self.assertRaisesRegex(ValueError,"Invalid Studio"):
+                studio.recording_capture(self.source)
+
+    def test_subprocess_floods_are_bounded_and_children_reaped(self):
+        for fd in (1,2):
+            pidfile = self.path / "pid"
+            code = (f'import os,pathlib; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); '
+                    f'block=b"x"*65536\nwhile True: os.write({fd},block)')
+            with self.assertRaisesRegex(ValueError,"output exceeds its byte limit"):
+                studio.run([sys.executable,"-c",code],5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pidfile.read_text()),0)
+
+    def test_subprocess_drains_both_pipes_and_enforces_timeout(self):
+        code = 'import os\nfor _ in range(8): os.write(1,b"a"*16384); os.write(2,b"b"*16384)'
+        self.assertEqual(studio.run([sys.executable,"-c",code],5), b"a"*(8*16384))
+        with self.assertRaises(subprocess.TimeoutExpired):
+            studio.run([sys.executable,"-c","import time; time.sleep(10)"],.1)
 
 
 if __name__ == "__main__":
