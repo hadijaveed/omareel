@@ -51,7 +51,15 @@ class Index(Runtime):
 
 def main():
     action, file, *args = sys.argv[1:]
-    with contextlib.closing(Index(Path(file).parent)) as index:
+    try:
+        store = Index(Path(file).parent)
+    except FileNotFoundError:
+        # A fresh installation has no recording directory yet. Reading its
+        # empty library must not create folders or show a startup error.
+        if action in ("list", "entry"):
+            return
+        raise
+    with contextlib.closing(store) as index:
         if action in ("patch", "append", "rewrite"):
             index.update(action, file, args)
         elif action == "list":

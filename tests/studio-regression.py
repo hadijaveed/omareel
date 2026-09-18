@@ -415,6 +415,14 @@ class StudioInputLimits(unittest.TestCase):
         return subprocess.run([sys.executable,str(ROOT/"bin/recording-index.py"),action,
                                str(self.source),*args],input=entry,capture_output=True,text=True,timeout=5)
 
+    def test_library_missing_directory_is_empty_without_creation(self):
+        self.source = self.path / "not-created" / "take.mp4"
+        for action in ("list", "entry"):
+            result=self.index_cli(action)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(result.stdout,"")
+        self.assertFalse(self.source.parent.exists())
+
     def test_library_patch_ignores_planted_legacy_temp_and_preserves_failed_write(self):
         self.index.write_text(json.dumps(dict(file=str(self.source),title="original"))+"\n")
         victim=self.path/"victim"
