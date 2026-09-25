@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runtime attack fixtures and normal startup/locking; no desktop/device access."""
 import concurrent.futures
+import ctypes
 import importlib.util
 import json
 import os
@@ -59,11 +60,58 @@ class RuntimeSecurity(unittest.TestCase):
 
     def test_owned_legacy_directory_is_tightened_without_losing_state(self):
         self.directory.mkdir(mode=0o755)
+        self.directory.chmod(0o755)
         state = self.directory / "state.json"
         state.write_text('{"phase":"recording","id":"existing"}')
         self.assertEqual(self.cli("status").returncode, 0)
         self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o700)
         self.assertEqual(json.loads(state.read_text())["id"], "existing")
+
+    def watch_directory_changes(self):
+        # Watch the real Linux directory-change events behind QFileSystemWatcher,
+        # not mocked fchmod calls. Opening/closing the checked state lock is
+        # expected; IN_CLOSE_WRITE alone is not a Qt directory-change event.
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1")
+        self.addCleanup(os.close, fd)
+        mask = 0x00000004 | 0x00000040 | 0x00000080 | 0x00000100 | 0x00000200 | 0x00000400 | 0x00000800
+        if libc.inotify_add_watch(fd, os.fsencode(self.directory), mask) < 0:
+            raise OSError(ctypes.get_errno(), "inotify_add_watch")
+        return fd
+
+    def directory_events(self, fd):
+        try:
+            return os.read(fd, 65536)
+        except BlockingIOError:
+            return b""
+
+    def test_repeated_status_reads_emit_no_directory_changes(self):
+        self.assertEqual(self.cli("status").returncode, 0)
+        before = (self.directory / "state.json").read_bytes()
+        watch = self.watch_directory_changes()
+        for _ in range(10):
+            result = self.cli("status")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.directory_events(watch), b"", "Status reads must not trigger the directory watcher")
+        self.assertEqual((self.directory / "state.json").read_bytes(), before)
+        # Positive control proves the watch detects the original failure.
+        os.chmod(self.directory, 0o700)
+        self.assertTrue(self.directory_events(watch))
+
+    def test_legacy_permission_repair_emits_once_then_status_is_quiet(self):
+        self.assertEqual(self.cli("status").returncode, 0)
+        self.directory.chmod(0o755)
+        watch = self.watch_directory_changes()
+        self.assertEqual(self.cli("status").returncode, 0)
+        self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o700)
+        self.assertTrue(self.directory_events(watch), "Legacy permissions must actually be tightened")
+        for _ in range(3):
+            self.assertEqual(self.cli("status").returncode, 0)
+        self.assertEqual(self.directory_events(watch), b"")
 
     def test_missing_relative_or_shared_tmp_runtime_is_rejected_before_config(self):
         for value in (None, "", "relative-path", "/tmp"):
