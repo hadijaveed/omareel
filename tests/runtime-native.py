@@ -23,7 +23,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omareel-runtime-native-") as directory:
         for filename in ("BarWidget.qml", "Panel.qml"):
             source = (ROOT / filename).read_text()
-            modes = ["normal", "symlink-start", "large-start", "large-later", "symlink-later"]
+            modes = ["normal", "idle-watchers", "symlink-start", "large-start", "large-later", "symlink-later"]
             if "studioOfferedFile" in source:
                 modes.append("studio-done")
             for mode in modes:
@@ -70,6 +70,9 @@ ShellRoot {
     property string message: ""
     property bool readPlanted: false
     property bool startedWrite: false
+    property int statusStarts: 0
+    property int settledStarts: -1
+    property bool settling: false
     property string studioOfferedFile: ""
     property string openedStudioFile: ""
     function openStudio(file) { openedStudioFile = file }
@@ -78,6 +81,13 @@ ShellRoot {
     __STATE__
     __WATCHER__
     __STARTUP__
+    Connections { target: stateFile; function onRunningChanged() { if (stateFile.running) root.statusStarts++ } }
+    Timer { id: settle; interval: 500; onTriggered: { root.settledStarts = root.statusStarts; quiet.start() } }
+    Timer { id: quiet; interval: 1000; onTriggered: {
+      if (root.statusStarts !== root.settledStarts) console.error("IDLE STATUS LOOP", root.settledStarts, root.statusStarts)
+      else console.log("RUNTIME NATIVE PASS")
+      Qt.quit()
+    } }
     Process { id: update; command: __COMMAND__ }
     Timer {
       interval: 30; running: true; repeat: true
@@ -96,6 +106,10 @@ ShellRoot {
           else console.log("RUNTIME NATIVE PASS")
           Qt.quit()
         } else if (root.state.id === "native-test" && (!__STUDIO__ || root.openedStudioFile === "fixture.mp4")) {
+          if (__IDLE__) {
+            if (!root.settling) { root.settling = true; settle.start() }
+            return
+          }
           console.log("RUNTIME NATIVE PASS")
           Qt.quit()
         }
@@ -107,7 +121,7 @@ ShellRoot {
 '''.replace("__CLI__", json.dumps(str(ROOT / "bin/omareel")))
                     .replace("__RUNTIME__", json.dumps(str(runtime))).replace("__STATE__", state)
                     .replace("__WATCHER__", watcher).replace("__STARTUP__", startup)
-                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()).replace("__LATE__", str(late).lower()).replace("__STUDIO__", str(mode == "studio-done").lower()))
+                    .replace("__COMMAND__", json.dumps(command)).replace("__UNSAFE__", str(unsafe).lower()).replace("__LATE__", str(late).lower()).replace("__STUDIO__", str(mode == "studio-done").lower()).replace("__IDLE__", str(mode == "idle-watchers").lower()))
                 env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
                            QT_QUICK_CONTROLS_STYLE="Basic", QT_QPA_PLATFORMTHEME="", XDG_RUNTIME_DIR=str(work),
                            XDG_CACHE_HOME=str(work / "cache"), OMAREEL_CONFIG=str(work / "config.json"))

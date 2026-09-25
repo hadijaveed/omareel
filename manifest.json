@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "hadijaveed.omareel",
   "name": "Omareel",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "author": "hadijaveed",
   "homepage": "https://github.com/hadijaveed/omareel",
   "description": "Record your screen, camera, and voice on Omarchy. Save locally or share a link from your own storage. Optional Studio adds click zooms, backgrounds, and frames for polished demos and tutorials.",

@@ -96,7 +96,10 @@ class Runtime:
             check_owner(os.fstat(self.fd), directory=True)
             # Older releases created an owned 0755 directory. Tighten it only
             # after verifying ownership, type and absence of shared write access.
-            os.fchmod(self.fd, 0o700)
+            # Even an unchanged chmod emits IN_ATTRIB and makes the shell's
+            # directory watchers invoke status again. Reads must stay quiet.
+            if stat.S_IMODE(os.fstat(self.fd).st_mode) != 0o700:
+                os.fchmod(self.fd, 0o700)
         except BaseException:
             self.close()
             raise

@@ -27,8 +27,9 @@ Storage providers may charge for their service. Maintained by
 [Hadi Javeed](https://github.com/hadijaveed) at
 [hadijaveed/omareel](https://github.com/hadijaveed/omareel).
 
-> **Version 0.9.3 adds optional Studio.** [Release notes](docs/0.9.3-release.md).
-> The marketplace currently verifies the 0.9.2 snapshot; the 0.9.3 update needs
+> **Version 0.9.4 fixes an idle CPU loop.** [Hotfix notes](docs/0.9.4-release.md).
+> Optional Studio remains included. [Studio release notes](docs/0.9.3-release.md).
+> The marketplace currently verifies the 0.9.2 snapshot; the latest update needs
 > its own maintainer review. [Marketplace listing](https://omarchyplugins.com/plugin.html?id=hadijaveed.omareel)
 > · [Tested coverage and limitations](docs/0.9.3-testing.md).
 
